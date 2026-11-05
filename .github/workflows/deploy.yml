@@ -27,7 +27,17 @@ jobs:
         env:
           VITE_GOOGLE_CLIENT_ID: ${{ vars.VITE_GOOGLE_CLIENT_ID }}
           VITE_BASE_PATH: /oweme/
-      - uses: actions/configure-pages@v5
+      - name: Verify production offline workflows
+        shell: bash
+        run: |
+          npm run preview -- --port 4173 > /tmp/oweme-preview.log 2>&1 &
+          preview_pid=$!
+          trap 'kill "$preview_pid" 2>/dev/null || true' EXIT
+          for attempt in {1..30}; do
+            if curl --silent --fail http://127.0.0.1:4173/oweme/ > /dev/null; then break; fi
+            sleep 1
+          done
+          node scripts/offline-smoke.mjs
       - uses: actions/upload-pages-artifact@v4
         with:
           path: dist
@@ -41,5 +51,6 @@ jobs:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
+      - uses: actions/configure-pages@v5
       - uses: actions/deploy-pages@v4
         id: deployment
