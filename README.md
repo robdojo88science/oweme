@@ -2,7 +2,7 @@
 
 A local-first lending notebook for one barangay lender. Borrowers never log in. Agreements, payment history, paper signatures, reminders, and backups live in the lender's browser.
 
-**GitHub Pages target:** [robdojo88science.github.io/oweme](https://robdojo88science.github.io/oweme/). **Not yet live:** GitHub rejected Pages setup with HTTP 422 because this private repository is not eligible for Pages under the account's current plan. Use a plan that supports private-repository Pages, or explicitly choose to make the repository public, then enable the workflow below. Repository visibility has not been changed. The deployment workflow is included and deployment is not claimed as verified.
+**Live app:** [robdojo88science.github.io/oweme](https://robdojo88science.github.io/oweme/). Published from the public repository through [GitHub Actions](https://github.com/robdojo88science/oweme/actions/runs/42024133134) on 2026-11-05. The live app passed offline reload, payment, and PDF checks; Lighthouse mobile accessibility measured 100/100 on its Home screen.
 
 OweMe has no server database and requires no account, password, or PIN. Connecting Google is optional and only authorizes backup access. Browser storage is the primary dataset; make a backup before clearing site data, moving devices, or uninstalling a browser.
 
@@ -214,9 +214,10 @@ The checklist below distinguishes implementation and tested business rules from 
 - [x] Search and responsive UI verified with 5,000 borrowers, 50,000 transactions, 500 active loans, and manual notes. The borrower list renders at most 14 rows; exact identifiers, typo search, keyboard navigation, and phone payment entry pass.
 - [x] Signature capture tested in Chrome with a paper-photo fixture, compressed evidence, perspective/crop/rotation, transparent cleanup, draw/undo/save. PDF pages were rendered and visually reviewed.
 - [ ] Verify camera crop, paper signature capture, physical haptics, install, print, and share on a real iPhone/iPad and Android device.
-- [x] Lighthouse 13.6.0 mobile accessibility measured **100/100** on the local production Home screen. The PWA category was [removed from Lighthouse 12](https://developers.google.com/speed/docs/insights/release_notes); manifest, icons, active service worker, cached font, and offline workflows were checked directly. See [the validation record](docs/QA.md).
-- [ ] Verify service-worker update/reload behavior across two deployed versions and run the production checks on the live Pages URL.
+- [x] Lighthouse 13.6.0 mobile accessibility measured **100/100** on both the local production and live GitHub Pages Home screens. The PWA category was [removed from Lighthouse 12](https://developers.google.com/speed/docs/insights/release_notes); manifest, icons, active service worker, cached font, and offline workflows were checked directly. See [the validation record](docs/QA.md).
+- [x] Live Pages URL returns HTTP 200. Its active service worker supports offline reload, calculator, borrower search, an offline payment, a peso-capable PDF receipt, and persisted balance after another reload, with no browser errors.
+- [ ] Verify service-worker update/reload behavior across two deployed versions.
 - [ ] Connect the lender's real Google project and confirm Drive update/restore and Gmail delivery. API behavior is unit-tested with mocks; no real account credentials were supplied for live validation.
-- [ ] Record a successful GitHub Pages deployment and confirm the live URL above.
+- [x] GitHub Pages deployment succeeded and the live URL above was verified.
 
 These remaining verification items are not presented as completed checks. Cloud setup and device permissions are external to the repository. A public hosted application does not publish IndexedDB borrower data: each browser has its own private local store, while deliberately exported backup files contain personal information and should be protected.
