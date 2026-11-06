@@ -1,6 +1,7 @@
 import { useEffect, useId, useRef, useState } from "react";
-import type { FormEvent, ReactNode } from "react";
+import type { FormEvent, InputHTMLAttributes, ReactNode } from "react";
 import { useLiveQuery } from "dexie-react-hooks";
+import { useLocation } from "react-router-dom";
 import {
   Archive,
   Cloud,
@@ -27,6 +28,8 @@ import {
   connectGoogle,
   disconnectGoogle,
   isGoogleConnected,
+  googleAccount,
+  readGoogleAccount,
   restoreDrive,
   sendEmailBackup,
   syncDrive,
@@ -51,6 +54,42 @@ const timestamp = (value?: string) =>
       }).format(new Date(value))
     : "No backup yet";
 const bytes = (value = 0) => `${(value / 1024 / 1024).toFixed(1)} MB`;
+/** Keep the editable text separate so deleting a numeric value stays empty.
+ * NaN marks an unfinished field in the unsaved draft; persist rejects it. */
+function NumericSettingInput({
+  value,
+  onValueChange,
+  ...props
+}: Omit<
+  InputHTMLAttributes<HTMLInputElement>,
+  "value" | "onChange" | "type"
+> & {
+  value: number;
+  onValueChange: (value: number) => void;
+}) {
+  const [text, setText] = useState(Number.isFinite(value) ? String(value) : "");
+  const previousValue = useRef(value);
+  useEffect(() => {
+    if (!Object.is(previousValue.current, value)) {
+      previousValue.current = value;
+      setText(Number.isFinite(value) ? String(value) : "");
+    }
+  }, [value]);
+  return (
+    <input
+      {...props}
+      type="number"
+      value={text}
+      onChange={(event) => {
+        const raw = event.target.value;
+        const next = raw.trim() === "" ? Number.NaN : Number(raw);
+        previousValue.current = next;
+        setText(raw);
+        onValueChange(next);
+      }}
+    />
+  );
+}
 function Card({
   title,
   topic,
@@ -74,10 +113,16 @@ function Card({
 
 export function SettingsPage({ settings, onImport, onClear, onToast }: Props) {
   const fieldId = useId();
+  const { search: routeSearch } = useLocation();
+  useEffect(() => {
+    if (new URLSearchParams(routeSearch).get("section") === "backup")
+      document.getElementById("backup")?.scrollIntoView({ block: "start" });
+  }, [routeSearch]);
   const [draft, setDraft] = useState<Settings>(() => structuredClone(settings));
   const [busy, setBusy] = useState("");
   const [error, setError] = useState("");
   const [connected, setConnected] = useState(isGoogleConnected());
+  const [account, setAccount] = useState(googleAccount());
   const [storage, setStorage] = useState<{
     persisted?: boolean;
     usage?: number;
@@ -85,6 +130,18 @@ export function SettingsPage({ settings, onImport, onClear, onToast }: Props) {
   }>({});
   const [logoURL, setLogoURL] = useState("");
   const loadedVersion = useRef(settings.updatedAt);
+  useEffect(() => {
+    const refresh = () => {
+      setConnected(isGoogleConnected());
+      setAccount(googleAccount());
+    };
+    const timer = window.setInterval(refresh, 30_000);
+    window.addEventListener("focus", refresh);
+    return () => {
+      window.clearInterval(timer);
+      window.removeEventListener("focus", refresh);
+    };
+  }, []);
   const profiles =
     useLiveQuery(() => db.signerProfiles.orderBy("name").toArray(), []) ?? [];
   const snapshots =
@@ -142,10 +199,15 @@ export function SettingsPage({ settings, onImport, onClear, onToast }: Props) {
       ...current,
       defaults: { ...current.defaults, ...patch },
     }));
-  const editScoring = (key: keyof Settings["scoring"], value: number) =>
+  const editThreshold = (index: number, value: number) =>
     setDraft((current) => ({
       ...current,
-      scoring: { ...current.scoring, [key]: value },
+      scoring: {
+        ...current.scoring,
+        thresholds: (current.scoring.thresholds ?? [95, 85, 70, 50]).map(
+          (n, i) => (i === index ? value : n),
+        ) as [number, number, number, number],
+      },
     }));
   async function persist(): Promise<void> {
     if (!draft.business.name.trim()) throw new Error("Enter a business name.");
@@ -167,21 +229,26 @@ export function SettingsPage({ settings, onImport, onClear, onToast }: Props) {
       draft.defaults.graceDays > 365
     )
       throw new Error("Mercy days must be from 0 to 365.");
+    const thresholds = draft.scoring.thresholds ?? [95, 85, 70, 50];
     if (
-      Object.entries(draft.scoring).some(
-        ([key, value]) =>
-          !Number.isFinite(value) ||
-          (key === "recency"
-            ? value <= 0 || value > 1
-            : value < 0 || value > 100),
+      thresholds.some(
+        (n, i) =>
+          !Number.isFinite(n) ||
+          n < 0 ||
+          n > 100 ||
+          (i > 0 && n >= thresholds[i - 1]),
       )
     )
       throw new Error(
-        "Score values must be from 0 to 100. Recency weight must be above 0 and at most 1.",
+        "Rating thresholds must descend from 5 to 2 stars, between 0 and 100%.",
       );
-    if (draft.scoring.minimum > draft.scoring.lateBase)
+    if (
+      !Number.isFinite(draft.defaults.affordabilityPercent ?? 30) ||
+      (draft.defaults.affordabilityPercent ?? 30) <= 0 ||
+      (draft.defaults.affordabilityPercent ?? 30) > 100
+    )
       throw new Error(
-        "Minimum late score cannot exceed the starting late score.",
+        "Affordability percentage must be greater than 0 and at most 100.",
       );
     if (
       draft.backup.email &&
@@ -476,54 +543,66 @@ export function SettingsPage({ settings, onImport, onClear, onToast }: Props) {
                 <span>
                   Interest rate (%) <Help topic="rate" />
                 </span>
-                <input
+                <NumericSettingInput
                   id={`${fieldId}-interest-rate`}
                   aria-label="Interest rate (%)"
-                  type="number"
                   min={0}
                   max={99.99}
                   step="0.01"
                   required
                   value={Number((draft.defaults.rate * 100).toFixed(2))}
-                  onChange={(event) =>
-                    editDefaults({ rate: Number(event.target.value) / 100 })
-                  }
+                  onValueChange={(value) => editDefaults({ rate: value / 100 })}
                 />
               </label>
               <label htmlFor={`${fieldId}-maximum-term`} className="field">
                 <span>
                   Maximum term (months) <Help topic="term" />
                 </span>
-                <input
+                <NumericSettingInput
                   id={`${fieldId}-maximum-term`}
                   aria-label="Maximum term (months)"
-                  type="number"
                   min={1}
                   max={120}
                   step={1}
                   required
                   value={draft.defaults.maxTerm}
-                  onChange={(event) =>
-                    editDefaults({ maxTerm: Number(event.target.value) })
+                  onValueChange={(value) => editDefaults({ maxTerm: value })}
+                />
+              </label>
+              <label className="field">
+                <span>
+                  Affordability guideline (%) <Help topic="cap" />
+                </span>
+                <NumericSettingInput
+                  aria-label="Default affordability percentage"
+                  min={1}
+                  max={100}
+                  step={1}
+                  value={draft.defaults.affordabilityPercent ?? 30}
+                  onValueChange={(value) =>
+                    editDefaults({
+                      affordabilityPercent: value,
+                    })
                   }
                 />
+                <small>
+                  Share of estimated monthly income available for installments.
+                  This is an editable guideline.
+                </small>
               </label>
               <label htmlFor={`${fieldId}-mercy-days`} className="field">
                 <span>
-                  Mercy days · admin only <Help topic="mercy" />
+                  Courtesy days · internal <Help topic="mercy" />
                 </span>
-                <input
+                <NumericSettingInput
                   id={`${fieldId}-mercy-days`}
-                  aria-label="Mercy days ? admin only"
-                  type="number"
+                  aria-label="Courtesy days · internal"
                   min={0}
                   max={365}
                   step={1}
                   required
                   value={draft.defaults.graceDays}
-                  onChange={(event) =>
-                    editDefaults({ graceDays: Number(event.target.value) })
-                  }
+                  onValueChange={(value) => editDefaults({ graceDays: value })}
                 />
               </label>
               <label htmlFor={`${fieldId}-interest-mode`} className="field">
@@ -550,63 +629,33 @@ export function SettingsPage({ settings, onImport, onClear, onToast }: Props) {
               priority.
             </p>
           </Card>
-          <Card title="Performance rating" topic="rating">
+          <Card title="Payment reliability" topic="rating">
+            <p className="caption" style={{ marginBottom: 18 }}>
+              Percentage of due installments fully paid by the contractual date.
+              Courtesy days count as late. New borrowers remain not rated until
+              a due date.
+            </p>
             <div className="form-grid">
-              {(
-                [
-                  ["onTime", "Paid by due date"],
-                  ["withinGrace", "Paid within mercy"],
-                  ["lateBase", "Late starting score"],
-                  ["latePerDay", "Deduction per late day"],
-                  ["minimum", "Minimum late score"],
-                ] as const
-              ).map(([key, label]) => (
-                <label
-                  htmlFor={`${fieldId}-scoring-${key}`}
-                  key={key}
-                  className="field"
-                >
-                  <span>
-                    {label} <Help topic="scoring" />
-                  </span>
-                  <input
-                    id={`${fieldId}-scoring-${key}`}
-                    aria-label={label}
-                    type="number"
+              {[5, 4, 3, 2].map((stars, index) => (
+                <label key={stars} className="field">
+                  <span>{stars} stars · minimum on-time (%)</span>
+                  <NumericSettingInput
+                    aria-label={stars + " star threshold"}
                     min={0}
                     max={100}
                     step={1}
-                    required
-                    value={draft.scoring[key]}
-                    onChange={(event) =>
-                      editScoring(key, Number(event.target.value))
+                    value={
+                      (draft.scoring.thresholds ?? [95, 85, 70, 50])[index]
                     }
+                    onValueChange={(value) => editThreshold(index, value)}
                   />
                 </label>
               ))}
-              <label htmlFor={`${fieldId}-recency-weight`} className="field">
-                <span>
-                  Recency weight <Help topic="rating" />
-                </span>
-                <input
-                  id={`${fieldId}-recency-weight`}
-                  aria-label="Recency weight"
-                  type="number"
-                  min={0.01}
-                  max={1}
-                  step={0.01}
-                  required
-                  value={draft.scoring.recency}
-                  onChange={(event) =>
-                    editScoring("recency", Number(event.target.value))
-                  }
-                />
-                <small>
-                  0.90 gives each older installment 90% of the next one's
-                  weight.
-                </small>
-              </label>
             </div>
+            <p className="caption" style={{ marginTop: 14 }}>
+              Below the 2-star threshold: 1 star. This describes recorded
+              payments and does not guarantee future repayment.
+            </p>
           </Card>
           <Card title="Your words, on every slip" topic="agreement">
             <label htmlFor={`${fieldId}-acknowledgement`} className="field">
@@ -691,317 +740,351 @@ export function SettingsPage({ settings, onImport, onClear, onToast }: Props) {
           </div>
         </form>
         <div>
-          <Card title="Backup & sync" topic="backup">
-            <div className="backup-status-card">
-              <ShieldCheck size={28} />
-              <div>
-                <b>
-                  {settings.backup.lastSuccess
-                    ? "Your notebook has a backup"
-                    : "Give your notebook a safety net"}
-                </b>
-                <p>{timestamp(settings.backup.lastSuccess)}</p>
-                <p>
-                  {connected
-                    ? "Google connected for this session"
-                    : "Saved on this device · Google not connected"}
-                </p>
+          <div id="backup">
+            <Card title="Backups & recovery" topic="backup">
+              <div className="backup-status-card">
+                <ShieldCheck size={28} />
+                <div>
+                  <b>
+                    {settings.backup.lastSuccess
+                      ? "Your notebook has a backup"
+                      : "Give your notebook a safety net"}
+                  </b>
+                  <p>{timestamp(settings.backup.lastSuccess)}</p>
+                  <p>
+                    {connected
+                      ? `Google connected for this session${account ? ` · ${account}` : ""}`
+                      : "Saved on this device · Google not connected"}
+                  </p>
+                  {Boolean(settings.backup.pendingDrive) && (
+                    <p>
+                      Local changes pending
+                      {connected
+                        ? " · Back up now or keep this app open with automatic Drive enabled."
+                        : " · Connect Google to upload."}
+                    </p>
+                  )}
+                  {typeof settings.backup.lastLocalExport === "string" &&
+                    settings.backup.lastLocalExport >
+                      String(settings.backup.lastLocalVerified || "") && (
+                      <p>
+                        Download requested{" "}
+                        {timestamp(settings.backup.lastLocalExport)}. Check the
+                        file is saved.
+                      </p>
+                    )}
+                </div>
               </div>
-            </div>
-            {settings.backup.lastError && (
-              <div className="alert error" role="status">
-                {settings.backup.lastError}
+              {settings.backup.lastError && (
+                <div className="alert error" role="status">
+                  {settings.backup.lastError}
+                  <button
+                    className="text-button"
+                    type="button"
+                    disabled={Boolean(busy)}
+                    onClick={() =>
+                      void run(
+                        "retry",
+                        connected && draft.backup.autoDrive
+                          ? sync
+                          : async () => {
+                              await persist();
+                              await saveLocalBackup();
+                            },
+                        "Backup retried",
+                      )
+                    }
+                  >
+                    Retry backup <RefreshCw size={13} />
+                  </button>
+                </div>
+              )}
+              <h3 className="form-section-title">01 / Local JSON file</h3>
+              <p className="caption">
+                Full backups include photos, signatures, and payment proof. Lite
+                backups leave images out.
+              </p>
+              <div className="backup-buttons">
                 <button
-                  className="text-button"
+                  type="button"
+                  className="button primary"
+                  disabled={Boolean(busy)}
+                  onClick={() =>
+                    void run(
+                      "full",
+                      async () => {
+                        await persist();
+                        await saveLocalBackup();
+                      },
+                      "Full backup saved. Keep the file outside this browser.",
+                    )
+                  }
+                >
+                  {buttonIcon("full", <Download size={15} />)} Full backup
+                </button>
+                <button
+                  type="button"
+                  className="button"
+                  disabled={Boolean(busy)}
+                  onClick={() =>
+                    void run(
+                      "lite",
+                      async () => {
+                        await persist();
+                        await saveLocalBackup(true);
+                      },
+                      "Lite backup saved without images",
+                    )
+                  }
+                >
+                  {buttonIcon("lite", <Download size={15} />)} Lite
+                </button>
+              </div>
+              <label htmlFor={`${fieldId}-import-backup`} className="field">
+                <span>
+                  <Upload size={13} /> Import a backup <Help topic="backup" />
+                </span>
+                <input
+                  id={`${fieldId}-import-backup`}
+                  aria-label="Import a backup"
+                  type="file"
+                  accept="application/json,.json"
+                  disabled={Boolean(busy)}
+                  onChange={(event) => {
+                    const file = event.target.files?.[0];
+                    event.target.value = "";
+                    if (file)
+                      void run("import", async () => {
+                        onImport(
+                          await previewImport(await file.text()),
+                          "file",
+                        );
+                      });
+                  }}
+                />
+                <small>
+                  Review counts and conflicts before choosing Merge or Replace.
+                </small>
+              </label>
+              <h3 className="form-section-title">02 / Google Drive</h3>
+              <label htmlFor={`${fieldId}-google-client-id`} className="field">
+                <span>
+                  Google Web Client ID <Help topic="backup" />
+                </span>
+                <input
+                  id={`${fieldId}-google-client-id`}
+                  aria-label="Google Web Client ID"
+                  value={draft.backup.googleClientId ?? ""}
+                  placeholder={String(
+                    import.meta.env.VITE_GOOGLE_CLIENT_ID ||
+                      "…apps.googleusercontent.com",
+                  )}
+                  onChange={(event) =>
+                    editBackup({ googleClientId: event.target.value.trim() })
+                  }
+                />
+                <small>
+                  Use your own Google Cloud project. Setup instructions are in
+                  the README.
+                </small>
+              </label>
+              <label htmlFor={`${fieldId}-auto-drive`} className="checkbox-row">
+                <input
+                  id={`${fieldId}-auto-drive`}
+                  aria-label="Automatically back up to Drive"
+                  type="checkbox"
+                  checked={Boolean(draft.backup.autoDrive)}
+                  onChange={(event) =>
+                    editBackup({ autoDrive: event.target.checked })
+                  }
+                />{" "}
+                Automatically back up to Drive <Help topic="backup" />
+              </label>
+              <div className="backup-buttons">
+                <button
+                  className="button primary"
                   type="button"
                   disabled={Boolean(busy)}
                   onClick={() =>
                     void run(
-                      "retry",
-                      connected && draft.backup.autoDrive
-                        ? sync
-                        : async () => {
-                            await persist();
-                            await saveLocalBackup();
-                          },
-                      "Backup retried",
+                      "connect",
+                      async () => {
+                        await persist();
+                        await connectGoogle(
+                          clientId,
+                          Boolean(draft.backup.emailEnabled),
+                        );
+                        setConnected(true);
+                        try {
+                          setAccount(await readGoogleAccount());
+                        } catch {
+                          setAccount(undefined);
+                        }
+                        const result = await syncDrive();
+                        if (result.kind === "remote-newer") {
+                          await updateBackupStatus({
+                            pendingDriveModifiedTime: result.modifiedTime,
+                          });
+                          onImport(result.preview, "drive");
+                        }
+                      },
+                      "Google connected",
                     )
                   }
                 >
-                  Retry backup <RefreshCw size={13} />
+                  {buttonIcon("connect", <Cloud size={15} />)}{" "}
+                  {connected ? "Reconnect Google" : "Connect Google"}
                 </button>
-              </div>
-            )}
-            <h3 className="form-section-title">01 / Local JSON file</h3>
-            <p className="caption">
-              Full backups include photos, signatures, and payment proof. Lite
-              backups leave images out.
-            </p>
-            <div className="backup-buttons">
-              <button
-                type="button"
-                className="button primary"
-                disabled={Boolean(busy)}
-                onClick={() =>
-                  void run(
-                    "full",
-                    async () => {
-                      await persist();
-                      await saveLocalBackup();
-                    },
-                    "Full backup saved. Keep the file outside this browser.",
-                  )
-                }
-              >
-                {buttonIcon("full", <Download size={15} />)} Full backup
-              </button>
-              <button
-                type="button"
-                className="button"
-                disabled={Boolean(busy)}
-                onClick={() =>
-                  void run(
-                    "lite",
-                    async () => {
-                      await persist();
-                      await saveLocalBackup(true);
-                    },
-                    "Lite backup saved without images",
-                  )
-                }
-              >
-                {buttonIcon("lite", <Download size={15} />)} Lite
-              </button>
-            </div>
-            <label htmlFor={`${fieldId}-import-backup`} className="field">
-              <span>
-                <Upload size={13} /> Import a backup <Help topic="backup" />
-              </span>
-              <input
-                id={`${fieldId}-import-backup`}
-                aria-label="Import a backup"
-                type="file"
-                accept="application/json,.json"
-                disabled={Boolean(busy)}
-                onChange={(event) => {
-                  const file = event.target.files?.[0];
-                  event.target.value = "";
-                  if (file)
-                    void run("import", async () => {
-                      onImport(await previewImport(await file.text()), "file");
-                    });
-                }}
-              />
-              <small>
-                Review counts and conflicts before choosing Merge or Replace.
-              </small>
-            </label>
-            <h3 className="form-section-title">02 / Google Drive</h3>
-            <label htmlFor={`${fieldId}-google-client-id`} className="field">
-              <span>
-                Google Web Client ID <Help topic="backup" />
-              </span>
-              <input
-                id={`${fieldId}-google-client-id`}
-                aria-label="Google Web Client ID"
-                value={draft.backup.googleClientId ?? ""}
-                placeholder={String(
-                  import.meta.env.VITE_GOOGLE_CLIENT_ID ||
-                    "…apps.googleusercontent.com",
-                )}
-                onChange={(event) =>
-                  editBackup({ googleClientId: event.target.value.trim() })
-                }
-              />
-              <small>
-                Use your own Google Cloud project. Setup instructions are in the
-                README.
-              </small>
-            </label>
-            <label htmlFor={`${fieldId}-auto-drive`} className="checkbox-row">
-              <input
-                id={`${fieldId}-auto-drive`}
-                aria-label="Automatically back up to Drive"
-                type="checkbox"
-                checked={Boolean(draft.backup.autoDrive)}
-                onChange={(event) =>
-                  editBackup({ autoDrive: event.target.checked })
-                }
-              />{" "}
-              Automatically back up to Drive <Help topic="backup" />
-            </label>
-            <div className="backup-buttons">
-              <button
-                className="button primary"
-                type="button"
-                disabled={Boolean(busy)}
-                onClick={() =>
-                  void run(
-                    "connect",
-                    async () => {
-                      await persist();
-                      await connectGoogle(
-                        clientId,
-                        Boolean(draft.backup.emailEnabled),
+                {connected && (
+                  <button
+                    type="button"
+                    className="button"
+                    onClick={() => {
+                      disconnectGoogle();
+                      setConnected(false);
+                      setAccount(undefined);
+                      onToast(
+                        "Google disconnected. Your local notebook is unchanged.",
                       );
-                      setConnected(true);
-                      const result = await syncDrive();
-                      if (result.kind === "remote-newer") {
-                        await updateBackupStatus({
-                          pendingDriveModifiedTime: result.modifiedTime,
-                        });
-                        onImport(result.preview, "drive");
-                      }
-                    },
-                    "Google connected",
-                  )
-                }
-              >
-                {buttonIcon("connect", <Cloud size={15} />)}{" "}
-                {connected ? "Reconnect Google" : "Connect Google"}
-              </button>
-              {connected && (
+                    }}
+                  >
+                    Disconnect
+                  </button>
+                )}
+              </div>
+              <div className="backup-buttons">
                 <button
                   type="button"
                   className="button"
-                  onClick={() => {
-                    disconnectGoogle();
-                    setConnected(false);
-                    onToast(
-                      "Google disconnected. Your local notebook is unchanged.",
-                    );
-                  }}
+                  disabled={Boolean(busy) || !connected}
+                  onClick={() => void run("drive", sync)}
                 >
-                  Disconnect
+                  {buttonIcon("drive", <RefreshCw size={15} />)} Back up / sync
+                  now
                 </button>
-              )}
-            </div>
-            <div className="backup-buttons">
-              <button
-                type="button"
-                className="button"
-                disabled={Boolean(busy) || !connected}
-                onClick={() => void run("drive", sync)}
-              >
-                {buttonIcon("drive", <RefreshCw size={15} />)} Back up / sync
-                now
-              </button>
-              <button
-                type="button"
-                className="button"
-                disabled={Boolean(busy) || !connected}
-                onClick={() =>
-                  void run("restore-drive", async () => {
-                    await persist();
-                    onImport(await restoreDrive(), "drive");
-                  })
-                }
-              >
-                {buttonIcon("restore-drive", <Archive size={15} />)} Restore
-                from Drive
-              </button>
-            </div>
-            {settings.backup.driveFileId && (
-              <p className="caption">
-                One linked OweMe-backup.json file. Last sync:{" "}
-                {timestamp(settings.backup.lastSync)}
-              </p>
-            )}
-            <div className="alert">
-              <Help topic="backup" /> Automatic backup runs while the app is
-              open, online, and connected to Google. A quick reconnect may be
-              needed after access expires.
-            </div>
-            <h3 className="form-section-title">03 / Email backup</h3>
-            <label htmlFor={`${fieldId}-backup-email`} className="field">
-              <span>
-                Backup email address <Help topic="backup" />
-              </span>
-              <input
-                id={`${fieldId}-backup-email`}
-                aria-label="Backup email address"
-                type="email"
-                value={draft.backup.email || ""}
-                placeholder={draft.adminEmail || "you@example.com"}
-                onChange={(event) => editBackup({ email: event.target.value })}
-              />
-            </label>
-            <label
-              htmlFor={`${fieldId}-email-enabled`}
-              className="checkbox-row"
-            >
-              <input
-                id={`${fieldId}-email-enabled`}
-                aria-label="Enable Gmail sending permission"
-                type="checkbox"
-                checked={Boolean(draft.backup.emailEnabled)}
-                onChange={(event) =>
-                  editBackup({ emailEnabled: event.target.checked })
-                }
-              />{" "}
-              Enable Gmail sending permission <Help topic="backup" />
-            </label>
-            <label htmlFor={`${fieldId}-email-frequency`} className="field">
-              <span>Send automatically</span>
-              <select
-                id={`${fieldId}-email-frequency`}
-                aria-label="Send automatically"
-                value={draft.backup.emailFrequency || "daily"}
-                onChange={(event) =>
-                  editBackup({
-                    emailFrequency: event.target.value as "daily" | "changes",
-                  })
-                }
-              >
-                <option value="daily">Daily, when the app opens</option>
-                <option value="changes">After changes while open</option>
-              </select>
-            </label>
-            <p className="caption">
-              Email comes from your own Gmail. Enable permission, then reconnect
-              Google. Backups above 20 MB use Lite.
-            </p>
-            <div className="backup-buttons">
-              <button
-                className="button"
-                type="button"
-                disabled={
-                  Boolean(busy) || !connected || !draft.backup.emailEnabled
-                }
-                onClick={() =>
-                  void run(
-                    "email",
-                    async () => {
+                <button
+                  type="button"
+                  className="button"
+                  disabled={Boolean(busy) || !connected}
+                  onClick={() =>
+                    void run("restore-drive", async () => {
                       await persist();
-                      await sendEmailBackup();
-                    },
-                    "Backup email sent from your Gmail",
-                  )
-                }
+                      onImport(await restoreDrive(), "drive");
+                    })
+                  }
+                >
+                  {buttonIcon("restore-drive", <Archive size={15} />)} Restore
+                  from Drive
+                </button>
+              </div>
+              {settings.backup.driveFileId && (
+                <p className="caption">
+                  One linked OweMe-backup.json file. Last confirmed upload:{" "}
+                  {timestamp(
+                    typeof settings.backup.lastDriveSuccess === "string"
+                      ? settings.backup.lastDriveSuccess
+                      : undefined,
+                  )}
+                </p>
+              )}
+              <div className="alert">
+                <Help topic="backup" /> Automatic backup runs while the app is
+                open, online, and connected to Google. A quick reconnect may be
+                needed after access expires.
+              </div>
+              <h3 className="form-section-title">03 / Email backup</h3>
+              <label htmlFor={`${fieldId}-backup-email`} className="field">
+                <span>
+                  Backup email address <Help topic="backup" />
+                </span>
+                <input
+                  id={`${fieldId}-backup-email`}
+                  aria-label="Backup email address"
+                  type="email"
+                  value={draft.backup.email || ""}
+                  placeholder={draft.adminEmail || "you@example.com"}
+                  onChange={(event) =>
+                    editBackup({ email: event.target.value })
+                  }
+                />
+              </label>
+              <label
+                htmlFor={`${fieldId}-email-enabled`}
+                className="checkbox-row"
               >
-                {buttonIcon("email", <Mail size={15} />)} Send backup email
-              </button>
-              <button
-                className="button"
-                type="button"
-                disabled={Boolean(busy)}
-                onClick={() =>
-                  void run("email-fallback", async () => {
-                    await persist();
-                    await saveLocalBackup();
-                    const recipient = draft.backup.email || draft.adminEmail;
-                    window.location.href = `mailto:${encodeURIComponent(recipient)}?subject=${encodeURIComponent("OweMe backup")}&body=${encodeURIComponent("My OweMe backup is attached. Please keep this file private.\n\nAttach the downloaded OweMe JSON file before sending.")}`;
-                  })
-                }
-              >
-                <Mail size={15} /> Email manually
-              </button>
-            </div>
-            <p className="caption">
-              Manual email opens your mail app. Attach the saved JSON file
-              yourself before sending.
-            </p>
-          </Card>
+                <input
+                  id={`${fieldId}-email-enabled`}
+                  aria-label="Enable Gmail sending permission"
+                  type="checkbox"
+                  checked={Boolean(draft.backup.emailEnabled)}
+                  onChange={(event) =>
+                    editBackup({ emailEnabled: event.target.checked })
+                  }
+                />{" "}
+                Enable Gmail sending permission <Help topic="backup" />
+              </label>
+              <label htmlFor={`${fieldId}-email-frequency`} className="field">
+                <span>Send automatically</span>
+                <select
+                  id={`${fieldId}-email-frequency`}
+                  aria-label="Send automatically"
+                  value={draft.backup.emailFrequency || "daily"}
+                  onChange={(event) =>
+                    editBackup({
+                      emailFrequency: event.target.value as "daily" | "changes",
+                    })
+                  }
+                >
+                  <option value="daily">Daily, when the app opens</option>
+                  <option value="changes">After changes while open</option>
+                </select>
+              </label>
+              <p className="caption">
+                Email comes from your own Gmail. Enable permission, then
+                reconnect Google. Backups above 20 MB use Lite.
+              </p>
+              <div className="backup-buttons">
+                <button
+                  className="button"
+                  type="button"
+                  disabled={
+                    Boolean(busy) || !connected || !draft.backup.emailEnabled
+                  }
+                  onClick={() =>
+                    void run(
+                      "email",
+                      async () => {
+                        await persist();
+                        await sendEmailBackup();
+                      },
+                      "Backup email sent from your Gmail",
+                    )
+                  }
+                >
+                  {buttonIcon("email", <Mail size={15} />)} Send backup email
+                </button>
+                <button
+                  className="button"
+                  type="button"
+                  disabled={Boolean(busy)}
+                  onClick={() =>
+                    void run("email-fallback", async () => {
+                      await persist();
+                      await saveLocalBackup();
+                      const recipient = draft.backup.email || draft.adminEmail;
+                      window.location.href = `mailto:${encodeURIComponent(recipient)}?subject=${encodeURIComponent("OweMe backup")}&body=${encodeURIComponent("My OweMe backup is attached. Please keep this file private.\n\nAttach the downloaded OweMe JSON file before sending.")}`;
+                    })
+                  }
+                >
+                  <Mail size={15} /> Email manually
+                </button>
+              </div>
+              <p className="caption">
+                Manual email opens your mail app. Attach the saved JSON file
+                yourself before sending.
+              </p>
+            </Card>
+          </div>
           <Card title="Local recovery snapshots" topic="backup">
             <p className="caption">
               The last five safety snapshots stay in this browser. A snapshot is
@@ -1084,6 +1167,23 @@ export function SettingsPage({ settings, onImport, onClear, onToast }: Props) {
             <p className="caption" style={{ marginTop: 12 }}>
               Asia/Manila · Philippine peso · No backend · No borrower login
             </p>
+            <details className="report-definitions">
+              <summary>Privacy notice & business review</summary>
+              <p>
+                Explain to each borrower what details you keep, why you need
+                them to administer the loan, who can receive them, and how to
+                request corrections or a retention review. Collect only what is
+                necessary and establish a suitable lawful basis.
+              </p>
+              <p>
+                Have your lending activity, pricing, disclosures, and
+                customizable agreement reviewed for applicable Philippine
+                licensing, interest/fee limits, and privacy obligations. A small
+                operation or lending without identity documents does not
+                establish an exemption. The default charge is a calculation
+                setting, not a legal-compliance guarantee.
+              </p>
+            </details>
           </Card>
           <section className="panel settings-card">
             <div className="section-title">

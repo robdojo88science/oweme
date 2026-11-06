@@ -28,6 +28,7 @@ import { addNote, updateBorrower } from "../data/service";
 import { Avatar, Empty, Help, Money, Stars } from "./primitives";
 import { Schedule, Status } from "./forms";
 import { buildSearch, Highlight, normalize } from "./search";
+import LoanDocuments from "./LoanDocuments";
 export default function BorrowersPage({
   data,
   actions,
@@ -112,6 +113,7 @@ export default function BorrowersPage({
             {
               balance: loans.reduce((s, l) => s + balance(l), 0),
               rating: borrowerRating(loans, asOf, data.settings.scoring).stars,
+              reliability: borrowerRating(loans, asOf, data.settings.scoring),
               recentActivity: loans.reduce(
                 (latest, loan) =>
                   loan.updatedAt > latest ? loan.updatedAt : latest,
@@ -504,10 +506,14 @@ export default function BorrowersPage({
               </div>
             </div>
             <div className="profile-info">
-              <span>
-                <MapPin size={13} />
-                {selected.address}
-              </span>
+              {selected.address && (
+                <span>
+                  <MapPin size={13} />
+                  {selected.address}
+                </span>
+              )}
+              {selected.barangay && <span>{selected.barangay}</span>}
+              {selected.alias && <span>Also known as {selected.alias}</span>}
               {selected.contact && (
                 <>
                   <a href={`tel:${selected.contact}`}>
@@ -521,6 +527,9 @@ export default function BorrowersPage({
                 </>
               )}
             </div>
+            <p className="caption" style={{ margin: "16px 0" }}>
+              {selectedSummary.reliability.explanation}
+            </p>
             <div className="profile-metrics">
               <div>
                 <small>
@@ -575,20 +584,64 @@ export default function BorrowersPage({
               </button>
             </div>
             <div className="tabs detail-tabs">
-              {["Overview", "Loans", "Transactions", "Notes"].map((t) => (
-                <button
-                  className={`tab ${tab === t ? "active" : ""}`}
-                  key={t}
-                  onClick={() => setTab(t)}
-                >
-                  {t}
-                  {t === "Loans" && (
-                    <span className="count">{selectedLoans.length}</span>
-                  )}
-                </button>
-              ))}
+              {["Overview", "Loans", "Payments", "Timeline", "Documents"].map(
+                (t) => (
+                  <button
+                    className={`tab ${tab === t ? "active" : ""}`}
+                    key={t}
+                    onClick={() => setTab(t)}
+                  >
+                    {t}
+                    {t === "Loans" && (
+                      <span className="count">{selectedLoans.length}</span>
+                    )}
+                  </button>
+                ),
+              )}
             </div>
             <div className="detail-body">
+              {tab === "Overview" && (
+                <>
+                  <div className="profile-metrics">
+                    <div>
+                      <small>Lifetime cash received</small>
+                      <b>
+                        <Money
+                          amount={txns
+                            .filter(
+                              (t) =>
+                                ["RELEASE", "ADVANCE"].includes(t.type) &&
+                                !txns.some((r) => r.voidOf === t.id),
+                            )
+                            .reduce((s, t) => s + t.amount, 0)}
+                        />
+                      </b>
+                    </div>
+                    <div>
+                      <small>Lifetime paid</small>
+                      <b>
+                        <Money
+                          amount={txns
+                            .filter(
+                              (t) =>
+                                t.type === "PAYMENT" &&
+                                !txns.some((r) => r.voidOf === t.id),
+                            )
+                            .reduce((s, t) => s + t.amount, 0)}
+                        />
+                      </b>
+                    </div>
+                  </div>
+                  <p className="caption" style={{ margin: "12px 0 20px" }}>
+                    {selectedSummary.reliability.onTime} on time ·{" "}
+                    {selectedSummary.reliability.late} late of{" "}
+                    {selectedSummary.reliability.count} due installments ·{" "}
+                    {selectedSummary.reliability.averageDaysLate.toFixed(1)}{" "}
+                    average days late ·{" "}
+                    {selectedSummary.reliability.settledLoans} settled loans
+                  </p>
+                </>
+              )}
               {(tab === "Overview" || tab === "Loans") &&
                 (selectedLoans.length ? (
                   [...selectedLoans]
@@ -718,7 +771,7 @@ export default function BorrowersPage({
                     }
                   />
                 ))}
-              {tab === "Transactions" &&
+              {tab === "Payments" &&
                 (txns.length ? (
                   <div className="table-wrap">
                     <table className="schedule">
@@ -770,7 +823,71 @@ export default function BorrowersPage({
                     body="Every release and payment will appear here."
                   />
                 ))}
-              {tab === "Notes" && (
+              {tab === "Documents" && (
+                <>
+                  {selectedLoans.map((loan) => (
+                    <div className="loan-card" key={loan.id}>
+                      <div className="loan-card-head">
+                        <div>
+                          <h3>{loan.loanNo}</h3>
+                          <p>Scans stay linked to this exact loan.</p>
+                        </div>
+                        <button
+                          className="button small"
+                          onClick={() => actions.signature(loan)}
+                        >
+                          <Camera size={14} /> Add scan
+                        </button>
+                      </div>
+                      <LoanDocuments loan={loan} onToast={actions.toast} />
+                      {Object.entries(loan.signatures).map(
+                        ([role, signature]) =>
+                          signature && (
+                            <DocumentPreview
+                              key={role}
+                              blob={signature.original}
+                              name={`${role} signed document`}
+                              date={signature.capturedAt}
+                            />
+                          ),
+                      )}
+                      {(loan.signatureHistory ?? []).map((revision, index) => (
+                        <DocumentPreview
+                          key={index}
+                          blob={revision.signature.original}
+                          name={`${revision.role} · previous revision`}
+                          date={revision.signature.capturedAt}
+                        />
+                      ))}
+                      {!Object.values(loan.signatures).some(Boolean) && (
+                        <p className="caption">
+                          No signed paper scan attached yet. Print the
+                          agreement, collect the paper signature, then capture
+                          or upload it.
+                        </p>
+                      )}
+                    </div>
+                  ))}
+                  {txns
+                    .filter((txn) => txn.proofImage)
+                    .map((txn) => (
+                      <DocumentPreview
+                        key={txn.id}
+                        blob={txn.proofImage!}
+                        name={`Payment proof · ${txn.txnNo}`}
+                        date={txn.createdAt}
+                      />
+                    ))}
+                  {!selectedLoans.length && (
+                    <Empty
+                      icon={<FileText />}
+                      title="No documents yet"
+                      body="Agreements and payment proof will stay with their borrower and loan."
+                    />
+                  )}
+                </>
+              )}
+              {tab === "Timeline" && (
                 <>
                   <form
                     className="note-form"
@@ -833,15 +950,14 @@ export default function BorrowersPage({
               </button>
               <button
                 onClick={async () => {
+                  if (selected.status === "active") {
+                    actions.remove(selected);
+                    return;
+                  }
                   try {
-                    const next =
-                      selected.status === "active" ? "archived" : "active";
+                    const next = "active";
                     await updateBorrower(selected.id, { status: next });
-                    actions.toast(
-                      next === "archived"
-                        ? "Borrower archived. Use the Archived filter to restore."
-                        : "Borrower restored.",
-                    );
+                    actions.toast("Borrower restored.");
                   } catch (e) {
                     actions.toast(String(e));
                   }
@@ -851,9 +967,11 @@ export default function BorrowersPage({
                   ? "Restore account"
                   : "Archive account"}
               </button>
-              <button onClick={() => actions.remove(selected)}>
-                Delete account
-              </button>
+              {selected.status === "archived" && (
+                <button onClick={() => actions.remove(selected)}>
+                  Privacy / archive controls
+                </button>
+              )}
             </div>
           </section>
         ) : (
@@ -871,4 +989,51 @@ export default function BorrowersPage({
 }
 function ArrowUpRightIcon() {
   return <ArrowRight size={13} style={{ transform: "rotate(-45deg)" }} />;
+}
+function DocumentPreview({
+  blob,
+  name,
+  date,
+}: {
+  blob: Blob;
+  name: string;
+  date: string;
+}) {
+  const [url, setURL] = useState("");
+  useEffect(() => {
+    const next = URL.createObjectURL(blob);
+    setURL(next);
+    return () => URL.revokeObjectURL(next);
+  }, [blob]);
+  return (
+    <div className="note-item">
+      <b>{name}</b>
+      <time>
+        Added{" "}
+        {new Intl.DateTimeFormat("en-PH", {
+          dateStyle: "medium",
+          timeStyle: "short",
+          timeZone: "Asia/Manila",
+        }).format(new Date(date))}
+      </time>
+      <a
+        href={url}
+        target="_blank"
+        rel="noreferrer"
+        aria-label={`Preview ${name}`}
+      >
+        <img
+          src={url}
+          alt={name}
+          style={{
+            maxWidth: "100%",
+            maxHeight: 150,
+            objectFit: "contain",
+            borderRadius: 10,
+            background: "#F7F8FB",
+          }}
+        />
+      </a>
+    </div>
+  );
 }

@@ -6,20 +6,20 @@ export const info = {
   released:
     "Actual cash handed over this month. A carried advance balance is never counted as new cash.",
   interest:
-    "Interest on new releases and advances this month. Carried balances are never charged interest again.",
+    "The one-time finance charge agreed at release. It is distinct from gross repayments and from cash-flow profit; carried balances are not charged again.",
   mercy:
-    "Admin only: a private grace period after the official due date. It never appears on borrower documents.",
+    "Internal courtesy window after the contractual due date. The payment is still late and the agreed due date does not move. No late fee is added.",
   rating:
-    "Paid on time earns 100, within the private grace period 85. Later payments lose 4 points per day beyond grace, down to 10; unpaid overdue installments score 0. Recent installments weigh more.",
+    "Stars use the share of due installments fully paid by their contractual due date: 95% = 5, 85% = 4, 70% = 3, 50% = 2; otherwise 1 by default. Partial payments qualify only when the full installment is paid. Courtesy payments are late. New borrowers are not rated.",
   income:
-    "Estimated monthly income (Sahod), based on your conversation. Income × term sets the maximum face amount.",
-  rate: "A single interest charge on the amount borrowed, rather than a monthly compounding rate.",
+    "Optional estimated monthly income (Sahod), based on your conversation. Income × term × affordability percentage suggests a face maximum; this is an editable guideline.",
+  rate: "One finance charge for the entire term. Upfront mode deducts a percentage of face value; add-on mode applies a charge to cash released. A 10% face deduction is not 10% per month or 10% APR. Set zero for no charge.",
   term: "Number of monthly installments. Each due date is calculated from the original release day, clamped to month end.",
   face: "The total amount the borrower agrees to repay. Upfront interest is deducted from this amount.",
   net: "The cash actually handed to the borrower, after any upfront deduction.",
-  cap: "Maximum face amount is monthly income × months. Advances also include the existing exposure. An explicit override is recorded in the audit log.",
+  cap: "Suggested face maximum = monthly income × months × affordability percentage. Default 30% leaves room for living costs. 100% reproduces the illustrative income × term example but may be unaffordable. An override needs a recorded reason; advances include existing exposure.",
   signatures:
-    "Capture a paper signature, draw on screen, or skip. Original photos are preserved along with cleaned transparent signatures.",
+    "Print the agreement and have it signed on real paper, then photograph or upload it to the exact loan. Original evidence and processed signatures are retained. On-screen signatures are optional.",
   storage:
     "Data stays in this browser. Persistent storage reduces eviction risk but backups are still essential, especially on iPhone and iPad.",
   backup:

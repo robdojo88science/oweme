@@ -42,6 +42,9 @@ async function createLoan(page: Page) {
   await createBorrower(page);
   await page.getByRole("button", { name: "New loan", exact: true }).click();
   await dialog(page).getByLabel("Loan amount", { exact: true }).fill("3000");
+  await dialog(page)
+    .getByLabel("Loan affordability percentage", { exact: true })
+    .fill("100");
   await dialog(page).getByLabel("Term in months", { exact: true }).fill("3");
   await dialog(page)
     .getByLabel("Release date", { exact: true })
@@ -52,12 +55,15 @@ async function createLoan(page: Page) {
   await expect(dialog(page).locator(".schedule")).toContainText("2026-03-31");
   await expect(dialog(page).locator(".schedule")).toContainText("2026-04-30");
   await dialog(page)
+    .getByRole("checkbox", { name: /^I reviewed the agreement and confirm/ })
+    .check();
+  await dialog(page)
     .getByRole("button", { name: "Release loan", exact: true })
     .click();
   await expect(
     dialog(page).getByRole("heading", { name: "Release receipt", exact: true }),
   ).toBeVisible();
-  await expect(receipt(page)).toContainText("OM-20260131-0001");
+  await expect(receipt(page)).toContainText("OWM-DIS-2026-000001");
   await expect(receipt(page).locator(".receipt-amount")).toContainText(
     "₱2,700.00",
   );
@@ -128,11 +134,13 @@ test("creates a borrower and month-end loan, then allocates 500 and 1500 on stab
     .getByRole("button", { name: "Download PDF", exact: true })
     .click();
   await expect((await download).suggestedFilename()).toBe(
-    "OM-20260301-0001.pdf",
+    "OWM-PAY-2026-000002.pdf",
   );
   await closeDialog(page);
   await page.reload();
-  await expect(page.locator(".profile-metrics")).toContainText("₱1,000.00");
+  await expect(page.locator(".profile-metrics").first()).toContainText(
+    "₱1,000.00",
+  );
 });
 
 test("finds borrower 001 by ID, accent-insensitive typo, address, and transaction number", async ({
@@ -148,7 +156,7 @@ test("finds borrower 001 by ID, accent-insensitive typo, address, and transactio
     "Mria Santos",
     "sántos maria",
     "Purok 1",
-    "OM-20260131-0001",
+    "OWM-DIS-2026-000001",
   ]) {
     await search.fill(query);
     await expect(
@@ -158,26 +166,26 @@ test("finds borrower 001 by ID, accent-insensitive typo, address, and transactio
   await expect(
     page.getByRole("heading", { name: "Matching transactions", exact: true }),
   ).toBeVisible();
-  await page.getByRole("button", { name: /OM-20260131-0001/ }).click();
+  await page.getByRole("button", { name: /OWM-DIS-2026-000001/ }).click();
   await expect(
     dialog(page).getByRole("heading", { name: "Release receipt", exact: true }),
   ).toBeVisible();
 });
 
-test("rejects a wrong delete phrase and preserves loan transactions after exact account deletion", async ({
+test("requires exact archive phrase and second confirmation while preserving history", async ({
   page,
 }) => {
   await createLoan(page);
   await pay(page, "500", "2026-02-28");
   await closeDialog(page);
   await page
-    .getByRole("button", { name: "Delete account", exact: true })
+    .getByRole("button", { name: "Archive account", exact: true })
     .click();
   const confirmation = dialog(page).getByLabel("Delete confirmation", {
     exact: true,
   });
   const confirm = dialog(page).getByRole("button", {
-    name: "Delete account",
+    name: "Archive borrower",
     exact: true,
   });
   await confirmation.fill("Delete maria santos");
@@ -185,20 +193,24 @@ test("rejects a wrong delete phrase and preserves loan transactions after exact 
   await confirmation.fill("Delete Maria Santos ");
   await expect(confirm).toBeDisabled();
   await confirmation.fill("Delete Maria Santos");
+  await expect(confirm).toBeDisabled();
+  await dialog(page)
+    .getByRole("checkbox", {
+      name: "I confirm I want to archive this borrower and preserve their history.",
+    })
+    .check();
   await expect(confirm).toBeEnabled();
   await confirm.click();
   await expect(
-    page.getByRole("heading", { name: "History", exact: true }),
+    page.getByRole("heading", { name: "Transactions", exact: true }),
   ).toBeVisible();
   await expect(page.locator(".history-table tbody tr")).toHaveCount(2);
+  await expect(page.locator(".history-table")).toContainText("Maria Santos");
   await expect(page.locator(".history-table")).toContainText(
-    "Deleted account · #001",
+    "OWM-DIS-2026-000001",
   );
   await expect(page.locator(".history-table")).toContainText(
-    "OM-20260131-0001",
-  );
-  await expect(page.locator(".history-table")).toContainText(
-    "OM-20260228-0001",
+    "OWM-PAY-2026-000001",
   );
 });
 
@@ -211,6 +223,9 @@ test("recalculates a merged advance, preserves its chain and auto note, and safe
   await page.getByRole("button", { name: "Advance loan", exact: true }).click();
   await dialog(page).getByLabel("Loan amount", { exact: true }).fill("1000");
   await dialog(page)
+    .getByLabel("Loan affordability percentage", { exact: true })
+    .fill("100");
+  await dialog(page)
     .getByLabel("Release date", { exact: true })
     .fill("2026-03-05");
   await dialog(page).getByLabel("Released by", { exact: true }).fill("Robert");
@@ -222,6 +237,9 @@ test("recalculates a merged advance, preserves its chain and auto note, and safe
     dialog(page).getByRole("button", { name: "Save advance", exact: true }),
   ).toBeDisabled();
   await dialog(page).getByLabel("Term in months", { exact: true }).fill("3");
+  await dialog(page)
+    .getByRole("checkbox", { name: /^I reviewed the agreement and confirm/ })
+    .check();
   await dialog(page)
     .getByRole("button", { name: "Save advance", exact: true })
     .click();
@@ -238,12 +256,12 @@ test("recalculates a merged advance, preserves its chain and auto note, and safe
   await expect(
     page.locator(".loan-card").filter({ hasText: "L-001-01" }).last(),
   ).toContainText("Rolled over");
-  await page.getByRole("button", { name: "Notes", exact: true }).click();
+  await page.getByRole("button", { name: "Timeline", exact: true }).click();
   await expect(page.locator(".note-item")).toContainText(
     "Advance on 2026-03-05",
   );
-  await page.getByRole("button", { name: "Transactions", exact: true }).click();
-  await page.getByRole("button", { name: /OM-20260305-0001/ }).click();
+  await page.getByRole("button", { name: "Payments", exact: true }).click();
+  await page.getByRole("button", { name: /OWM-DIS-2026-000002/ }).click();
   await dialog(page)
     .getByRole("button", { name: "Void this advance", exact: true })
     .click();
@@ -255,7 +273,9 @@ test("recalculates a merged advance, preserves its chain and auto note, and safe
     .click();
   await expect(receipt(page)).toContainText("VOIDED");
   await closeDialog(page);
-  await expect(page.locator(".profile-metrics")).toContainText("₱2,000.00");
+  await expect(page.locator(".profile-metrics").first()).toContainText(
+    "₱2,000.00",
+  );
   await page
     .getByRole("button", { name: "Loans", exact: false })
     .filter({ hasText: /^Loans/ })
@@ -321,7 +341,7 @@ test("requires an external backup, exact clear phrase and a continuous three-sec
   await expect(savedCopy).toBeDisabled();
   await dialog(page)
     .getByLabel("Clear all confirmation", { exact: true })
-    .fill("DELETE ALL DATA");
+    .fill("CLEAR ALL OWEME DATA");
   await expect(hold).toBeDisabled();
   const downloadEvent = page.waitForEvent("download");
   await dialog(page)
@@ -339,15 +359,15 @@ test("requires an external backup, exact clear phrase and a continuous three-sec
   await savedCopy.check();
   await dialog(page)
     .getByLabel("Clear all confirmation", { exact: true })
-    .fill("delete all data");
+    .fill("clear all oweme data");
   await expect(hold).toBeDisabled();
   await dialog(page)
     .getByLabel("Clear all confirmation", { exact: true })
-    .fill("DELETE ALL DATA ");
+    .fill("CLEAR ALL OWEME DATA ");
   await expect(hold).toBeDisabled();
   await dialog(page)
     .getByLabel("Clear all confirmation", { exact: true })
-    .fill("DELETE ALL DATA");
+    .fill("CLEAR ALL OWEME DATA");
   await expect(hold).toBeEnabled();
   await hold.hover();
   await page.mouse.down();
@@ -406,6 +426,6 @@ test("requires an external backup, exact clear phrase and a continuous three-sec
   await page.goto("#/history");
   await expect(page.locator(".history-table tbody tr")).toHaveCount(1);
   await expect(page.locator(".history-table")).toContainText(
-    "OM-20260131-0001",
+    "OWM-DIS-2026-000001",
   );
 });

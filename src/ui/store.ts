@@ -16,14 +16,4 @@ export function haptic(
     error: [45, 35, 45],
   };
   if (navigator.vibrate) navigator.vibrate(patterns[pattern]);
-  else if (CSS.supports("-webkit-touch-callout", "none")) {
-    const input = document.createElement("input");
-    input.type = "checkbox";
-    if (!("switch" in input)) return;
-    input.setAttribute("switch", "");
-    input.style.cssText = "position:fixed;left:-100px;opacity:0";
-    document.body.append(input);
-    input.click();
-    input.remove();
-  }
 }

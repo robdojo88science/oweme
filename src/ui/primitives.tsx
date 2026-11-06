@@ -74,7 +74,7 @@ export function Avatar({
 }
 export function Stars({ stars }: { stars: number | null }) {
   return stars === null ? (
-    <span className="new-rating">New borrower</span>
+    <span className="new-rating">Not rated</span>
   ) : (
     <span className="stars" aria-label={`${stars} out of 5 stars`}>
       ★ <b>{stars.toFixed(1)}</b>

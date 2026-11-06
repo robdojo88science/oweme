@@ -25,6 +25,7 @@ import {
 import { Field, Schedule } from "./forms";
 import type { LoanPreset } from "./forms";
 import { Empty, ErrorBox, Help, Money, Stars } from "./primitives";
+import { loanCost } from "./loanCost";
 
 type Mode = "quick" | "reverse" | "payment" | "advance";
 type CarriedPreset = LoanPreset & {
@@ -51,6 +52,10 @@ export function CalculatorPage({
   const [mode, setMode] = useState<Mode>("quick");
   const [borrowerId, setBorrowerId] = useState("");
   const [income, setIncome] = useState("1000.00");
+  const [affordability, setAffordability] = useState(
+    String(settings.defaults.affordabilityPercent ?? 30),
+  );
+  const [maximumTerm, setMaximumTerm] = useState("");
   const [term, setTerm] = useState(Math.min(3, settings.defaults.maxTerm));
   const [rate, setRate] = useState(String(settings.defaults.rate * 100));
   const [interestMode, setInterestMode] = useState(
@@ -79,7 +84,9 @@ export function CalculatorPage({
   const defaultPayment = monthlyUnpaid
     ? monthlyUnpaid.amountDue - monthlyUnpaid.amountPaid
     : 0;
-  const maxTerm = borrower?.maxTermOverride ?? settings.defaults.maxTerm;
+  const maxTerm = maximumTerm
+    ? Number(maximumTerm)
+    : (borrower?.maxTermOverride ?? settings.defaults.maxTerm);
   const graceDays = borrower?.graceDaysOverride ?? settings.defaults.graceDays;
   const exposure = borrowerLoans.reduce(
     (total, loan) => total + balance(loan),
@@ -109,25 +116,35 @@ export function CalculatorPage({
           paymentDate,
         );
     } else {
-      if (term > maxTerm)
+      if (
+        !Number.isInteger(maxTerm) ||
+        maxTerm < 1 ||
+        maxTerm > 120 ||
+        term > maxTerm
+      )
         throw new Error(`Choose a term up to ${maxTerm} months.`);
       if (!rate.trim())
         throw new Error(
           "Enter an interest rate, including 0 for an interest-free loan.",
         );
       const incomeCents = parseMoney(income || "0");
+      const factor = Number(affordability);
+      if (!affordability || factor < 1 || factor > 100)
+        throw new Error("Choose an affordability percentage from 1 to 100.");
+      const suggestedFace = Math.round((incomeCents * term * factor) / 100);
       const faceAtCap =
         mode === "advance"
           ? Math.max(
               0,
-              incomeCents * term -
+              suggestedFace -
                 (advanceMode === "merge" && previousLoan
                   ? balance(previousLoan)
                   : exposure),
             )
-          : incomeCents * term;
+          : suggestedFace;
       const atCap = quoteLoan({
         income: incomeCents,
+        affordabilityPercent: factor,
         term,
         rate: Number(rate) / 100,
         interestMode,
@@ -140,6 +157,7 @@ export function CalculatorPage({
       );
       quote = quoteLoan({
         income: incomeCents,
+        affordabilityPercent: factor,
         term,
         rate: Number(rate) / 100,
         interestMode,
@@ -151,6 +169,7 @@ export function CalculatorPage({
           balance: balance(previousLoan),
           allOutstanding: exposure,
           income: incomeCents,
+          affordabilityPercent: factor,
           term,
           rate: Number(rate) / 100,
           interestMode,
@@ -206,6 +225,8 @@ export function CalculatorPage({
       amount: moneyInput(resolvedAmount),
       inputMode: actualInputMode,
       income,
+      affordabilityPercent: Number(affordability),
+      maxTermOverride: maximumTerm ? Number(maximumTerm) : undefined,
       rate,
       advance: mode === "advance",
       advanceMode,
@@ -220,6 +241,10 @@ export function CalculatorPage({
   const monthly = advance?.monthly ?? quote?.monthly ?? 0;
   const cash = advance?.netCash ?? quote?.netRelease ?? 0;
   const interest = advance?.interest ?? quote?.interest ?? 0;
+  const costs =
+    mode !== "advance" && quote && !error
+      ? loanCost(cash, interest, releaseDate, items)
+      : undefined;
   const eligible = borrowers.filter(
     (person) =>
       person.status === "active" &&
@@ -231,8 +256,8 @@ export function CalculatorPage({
     <>
       <div className="page-heading">
         <div>
-          <h1>Make the numbers clear.</h1>
-          <p>Explore a loan, payment, or advance. Every centavo adds up.</p>
+          <h1>Loan calculator</h1>
+          <p>Explore the terms before you commit. Nothing is saved here.</p>
         </div>
         <span className="date-pill desktop-only">
           <Sparkles size={14} />
@@ -430,12 +455,28 @@ export function CalculatorPage({
                     type="number"
                     min="1"
                     max={maxTerm}
-                    value={term}
+                    value={term || ""}
                     onChange={(event) => setTerm(Number(event.target.value))}
                     aria-label="Calculator term"
                   />
                 </Field>
-                <Field label="Interest rate (%)" topic="rate">
+                <Field label="Affordability (%)" topic="cap">
+                  <input
+                    type="number"
+                    min="1"
+                    max="100"
+                    value={affordability}
+                    onChange={(event) => {
+                      setAffordability(event.target.value);
+                      setAmount("");
+                    }}
+                    aria-label="Calculator affordability percentage"
+                  />
+                  <small>
+                    Suggested share of monthly income committed to repayment.
+                  </small>
+                </Field>
+                <Field label="One-time charge (%)" topic="rate">
                   <input
                     type="number"
                     min="0"
@@ -446,18 +487,37 @@ export function CalculatorPage({
                     aria-label="Calculator interest rate"
                   />
                 </Field>
-                <Field label="Interest mode" topic="rate">
+                <Field label="Maximum months (optional)" topic="term">
+                  <input
+                    type="number"
+                    min="1"
+                    max="120"
+                    value={maximumTerm}
+                    onChange={(event) => setMaximumTerm(event.target.value)}
+                    placeholder={`Default: ${borrower?.maxTermOverride ?? settings.defaults.maxTerm}`}
+                  />
+                </Field>
+                <Field label="Charge type" topic="rate">
                   <select
-                    value={interestMode}
+                    aria-label="Calculator charge type"
+                    value={rate === "0" ? "zero" : interestMode}
                     onChange={(event) => {
+                      if (event.target.value === "zero") {
+                        setRate("0");
+                        setInterestMode("upfront");
+                        return;
+                      }
+                      if (rate === "0")
+                        setRate(String(settings.defaults.rate * 100));
                       setInterestMode(
                         event.target.value as "upfront" | "added",
                       );
                       setAmount("");
                     }}
                   >
-                    <option value="upfront">Deducted upfront</option>
-                    <option value="added">Added on top</option>
+                    <option value="upfront">Upfront face deduction</option>
+                    <option value="added">Add-on charge</option>
+                    <option value="zero">Zero interest</option>
                   </select>
                 </Field>
                 {mode !== "reverse" && (
@@ -498,7 +558,7 @@ export function CalculatorPage({
                     onChange={(event) => setAmount(event.target.value)}
                     aria-label="Calculator amount"
                   />
-                  <small>Leave blank to use the available income cap.</small>
+                  <small>Leave blank to use the suggested amount.</small>
                 </Field>
                 <Field
                   label={mode === "advance" ? "Advance date" : "Release date"}
@@ -613,7 +673,9 @@ export function CalculatorPage({
             <>
               <div className="calc-big">
                 <small>
-                  {mode === "advance" ? "CASH TO HAND OVER NOW" : "NET RELEASE"}
+                  {mode === "advance"
+                    ? "CASH TO HAND OVER NOW"
+                    : "ACTUAL CASH RELEASED"}
                 </small>
                 <Money amount={cash} />
                 <p>
@@ -642,7 +704,7 @@ export function CalculatorPage({
                 </div>
                 <div>
                   <small>
-                    Interest <Help topic="interest" />
+                    Finance charge <Help topic="interest" />
                   </small>
                   <b>
                     <Money amount={interest} />
@@ -652,7 +714,7 @@ export function CalculatorPage({
                   <small>
                     {mode === "advance"
                       ? "Maximum advance available"
-                      : "Maximum face allowed"}{" "}
+                      : "Suggested face maximum"}{" "}
                     <Help topic="cap" />
                   </small>
                   <b>
@@ -660,6 +722,26 @@ export function CalculatorPage({
                   </b>
                 </div>
               </div>
+              <div className="receipt-row" style={{ marginTop: 20 }}>
+                <span>Total repayable / opening balance</span>
+                <b>{formatMoney(face)}</b>
+              </div>
+              <div
+                className={`alert ${Number(affordability) >= 100 ? "amber" : ""}`}
+              >
+                {Number(affordability) >= 100
+                  ? "This commits 100% of reported income. Living costs may make repayment unaffordable; consider a lower percentage."
+                  : `Guideline: income × ${term} months × ${affordability}%. Review living costs and all existing obligations.`}
+                <p>The guideline is editable and does not approve a loan.</p>
+              </div>
+              <p className="caption">
+                {Number(rate) === 0
+                  ? "No finance charge."
+                  : `${rate}% is a single ${interestMode === "upfront" ? "deduction from face value" : "add-on charge"} for the entire term. It is not a monthly rate or APR.`}
+                {costs &&
+                  interest > 0 &&
+                  ` Cost versus cash received: ${costs.costOfCashPercent.toFixed(2)}%. Annualized effective estimate: ${costs.effectiveAnnualPercent.toFixed(2)}% using actual due dates (Actual/365). This cash-flow comparison is not a statutory APR.`}
+              </p>
               {advance && previousLoan && (
                 <div className="before-after">
                   <div>
@@ -704,15 +786,16 @@ export function CalculatorPage({
               )}
               {capExceeded && (
                 <div className="alert amber">
-                  This amount exceeds the income cap. Review it before release;
-                  saving requires an explicit cap override in the loan form.
+                  This amount exceeds the affordability guideline. Review it
+                  before release; saving requires a recorded override reason in
+                  the loan form.
                 </div>
               )}
               <div className="section-title" style={{ marginTop: 28 }}>
                 <h2>Monthly schedule</h2>
                 <CalendarDays size={16} color="#a6a2bb" />
               </div>
-              <Schedule items={items} admin={false} />
+              <Schedule items={items} admin={false} forecast />
               <p className="caption" style={{ marginTop: 15 }}>
                 Official due dates only. The last installment includes any
                 centavo remainder.

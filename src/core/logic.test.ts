@@ -6,6 +6,7 @@ import {
   borrowerNumber,
   borrowerRating,
   canDeleteBorrower,
+  canClearAll,
   formatMoney,
   installmentScore,
   installmentStatus,
@@ -40,6 +41,31 @@ describe("integer centavo loan calculations", () => {
     expect(() => parseMoney("-1")).toThrow();
     expect(() => parseMoney("1e3")).toThrow();
     expect(formatMoney(100005)).toContain("1,000.05");
+  });
+  it("offers a conservative editable affordability guideline without changing pricing", () => {
+    const quote = quoteLoan({
+      income: 100000,
+      term: 3,
+      rate: 0.1,
+      interestMode: "upfront",
+      amount: 300000,
+      affordabilityPercent: 30,
+    });
+    expect(quote).toMatchObject({
+      maxFace: 90000,
+      face: 300000,
+      netRelease: 270000,
+      capExceeded: true,
+    });
+    expect(
+      quoteLoan({
+        income: 100000,
+        term: 3,
+        rate: 0,
+        interestMode: "upfront",
+        affordabilityPercent: 100,
+      }),
+    ).toMatchObject({ maxFace: 300000, netRelease: 300000, interest: 0 });
   });
   it("adds interest on top and reverses cash without floating point money", () => {
     expect(
@@ -251,16 +277,16 @@ describe("statuses, ratings, and identifiers", () => {
       "Overdue",
     );
   });
-  it("scores on time, grace, late, minimum, unpaid and New correctly", () => {
+  it("counts only full repayment by the contractual due date as on time", () => {
     const paid = (d: string) => ({
       ...item,
       amountPaid: item.amountDue,
       paidDate: d,
     });
     expect(installmentScore(paid("2026-02-05"), "2026-03-01")).toBe(100);
-    expect(installmentScore(paid("2026-02-10"), "2026-03-01")).toBe(85);
-    expect(installmentScore(paid("2026-02-11"), "2026-03-01")).toBe(66);
-    expect(installmentScore(paid("2026-03-11"), "2026-03-11")).toBe(10);
+    expect(installmentScore(paid("2026-02-10"), "2026-03-01")).toBe(0);
+    expect(installmentScore(paid("2026-02-11"), "2026-03-01")).toBe(0);
+    expect(installmentScore(paid("2026-03-11"), "2026-03-11")).toBe(0);
     expect(installmentScore(item, "2026-02-11")).toBe(0);
     expect(borrowerRating([], "2026-02-01")).toMatchObject({
       stars: null,
@@ -288,7 +314,7 @@ describe("statuses, ratings, and identifiers", () => {
       false,
     );
   });
-  it("weights installments by official due-date recency and rounds half stars", () => {
+  it("uses transparent on-time percentage thresholds and reports late days", () => {
     const earlier = { ...item, amountPaid: 100000, paidDate: "2026-03-31" };
     const recent = {
       ...item,
@@ -302,8 +328,48 @@ describe("statuses, ratings, and identifiers", () => {
       [{ status: "active", installments: [earlier, recent] }],
       "2026-04-01",
     );
-    expect(result.score).toBeCloseTo((100 + 10 * 0.9) / 1.9);
-    expect(result.stars).toBe(3);
+    expect(result.score).toBe(50);
+    expect(result.stars).toBe(2);
+    expect(result).toMatchObject({
+      onTime: 1,
+      late: 1,
+      count: 2,
+      averageDaysLate: 54,
+    });
+    expect(
+      borrowerRating(
+        [
+          {
+            installments: [
+              {
+                ...item,
+                dueDate: "2027-01-01",
+                amountPaid: 100000,
+                paidDate: "2026-01-01",
+              },
+            ],
+          },
+        ],
+        "2026-12-01",
+      ).stars,
+    ).toBeNull();
+  });
+  it("finishes two partial payments late within courtesy without moving the due date", () => {
+    const first = allocatePayment([item], 50000, "2026-02-05");
+    const second = allocatePayment(first.installments, 50000, "2026-02-06");
+    expect(second.installments[0].dueDate).toBe("2026-02-05");
+    expect(
+      borrowerRating([{ installments: second.installments }], "2026-02-06"),
+    ).toMatchObject({ onTime: 0, late: 1, stars: 1, averageDaysLate: 1 });
+  });
+  it("requires the exact clear phrase and successful backup before a full hold", () => {
+    expect(canClearAll("DELETE ALL DATA", true, 3000)).toBe(false);
+    expect(canClearAll("CLEAR ALL OWEME DATA", false, 3000)).toBe(false);
+    expect(canClearAll("CLEAR ALL OWEME DATA", true, 2999)).toBe(false);
+    expect(canClearAll("CLEAR ALL OWEME DATA", true, 3000)).toBe(true);
+    expect(transactionNumber("2026-11-05", 1, "PAY")).toBe(
+      "OWM-PAY-2026-000001",
+    );
   });
   it("does not penalize zero-cent remainder slots on very small loans", () => {
     const items = schedule(1, 3, "2026-01-05", 5);

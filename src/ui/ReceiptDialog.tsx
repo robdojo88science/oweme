@@ -77,6 +77,7 @@ export function ReceiptDialog({
   const [error, setError] = useState("");
   const [voiding, setVoiding] = useState(false);
   const [confirmVoid, setConfirmVoid] = useState(false);
+  const [privacyReviewed, setPrivacyReviewed] = useState(false);
   const [reason, setReason] = useState("");
   const logo = useBlobURL(settings.business.logo);
   const proof = useBlobURL(txn.proofImage);
@@ -447,6 +448,15 @@ export function ReceiptDialog({
           )}
         </div>
       </article>
+      <label className="checkbox-row" style={{ margin: "0 23px 16px" }}>
+        <input
+          type="checkbox"
+          checked={privacyReviewed}
+          onChange={(event) => setPrivacyReviewed(event.target.checked)}
+        />
+        I reviewed the preview and have permission to share these borrower
+        details with the intended recipient.
+      </label>
       <div className="receipt-actions">
         <button
           className="button primary"
@@ -473,7 +483,7 @@ export function ReceiptDialog({
         </button>
         <button
           className="button"
-          disabled={!pdf || preparing}
+          disabled={!pdf || preparing || !privacyReviewed}
           onClick={() => void share(pdf)}
         >
           <Share2 size={15} />
@@ -494,7 +504,7 @@ export function ReceiptDialog({
         </button>
         <button
           className="button"
-          disabled={!image || preparing}
+          disabled={!image || preparing || !privacyReviewed}
           onClick={() => void share(image)}
         >
           <FileImage size={15} />
@@ -513,7 +523,7 @@ export function ReceiptDialog({
           </details>
         </div>
       )}
-      {!voided && (txn.type === "PAYMENT" || txn.type === "ADVANCE") && (
+      {!voided && ["PAYMENT", "ADVANCE", "RELEASE"].includes(txn.type) && (
         <div
           className="modal-body"
           style={{ borderTop: "1px solid var(--line)" }}
@@ -525,7 +535,12 @@ export function ReceiptDialog({
               onClick={() => setConfirmVoid(true)}
             >
               <Ban size={14} />
-              Void this {txn.type === "ADVANCE" ? "advance" : "payment"}
+              Void this{" "}
+              {txn.type === "ADVANCE"
+                ? "advance"
+                : txn.type === "RELEASE"
+                  ? "cash release"
+                  : "payment"}
             </button>
           ) : (
             <div>
@@ -535,7 +550,9 @@ export function ReceiptDialog({
               <p className="caption" style={{ marginBottom: 14 }}>
                 {txn.type === "ADVANCE"
                   ? "The earlier loan will reopen in merge mode. Void payments on the advance loan first. "
-                  : "The payment allocation will be reversed. "}
+                  : txn.type === "RELEASE"
+                    ? "Correct an erroneous cash release only after reversing all payments and linked advances. The loan becomes voided; this does not record a separate refund of money. "
+                    : "The payment allocation will be reversed. "}
                 A numbered reversal stays in History alongside this original
                 transaction.
               </p>

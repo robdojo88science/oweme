@@ -2,7 +2,7 @@ import { readFile, mkdir, writeFile } from "node:fs/promises";
 import { describe, expect, it, vi } from "vitest";
 import type { Borrower, Loan, Settings, Transaction } from "../core/model";
 import { schedule } from "../core/logic";
-import { loanSlipPDF, receiptPDF, statementPDF } from "./pdf";
+import { loanSlipPDF, receiptPDF, reportPDF, statementPDF } from "./pdf";
 
 const meta = {
   id: "pdf-fixture",
@@ -96,7 +96,7 @@ const txn: Transaction = {
 };
 
 describe("PDF export", () => {
-  it("embeds the Unicode font and generates all three document types as valid PDFs", async () => {
+  it("embeds the Unicode font and generates all document types as valid PDFs", async () => {
     const ttf = await readFile(
       new URL("./fonts/NotoSans-Regular.ttf", import.meta.url),
     );
@@ -108,11 +108,40 @@ describe("PDF export", () => {
         receiptPDF(txn, loan, settings),
         loanSlipPDF(loan, txn, settings),
         statementPDF(borrower, [loan], [txn], settings),
+        reportPDF(
+          {
+            ...settings,
+            business: { name: "OweMe - layout preview", address: "" },
+          },
+          {
+            from: "2026-11-01",
+            to: "2026-11-30",
+            asOf: "2026-11-06",
+            metrics: [
+              ["Cash collected", "₱0.00"],
+              ["Cash released", "₱0.00"],
+              ["Net cash flow", "₱0.00"],
+              ["Recognized finance charges", "₱0.00"],
+            ],
+            channels: [],
+            aging: [
+              ["1-7 days", "₱0.00"],
+              ["8-30 days", "₱0.00"],
+              ["31-60 days", "₱0.00"],
+              ["61+ days", "₱0.00"],
+            ],
+            notes: [
+              "Layout preview only. No borrower records are included.",
+              "Collections are cash received, not pure profit. Finance charges are recognized proportionally to applied repayments. Current balances are separate from date-range activity.",
+            ],
+          },
+        ),
       ]);
       expect(files.map((file) => file.name)).toEqual([
         "OM-20261205-0001.pdf",
         "L-001-02-agreement.pdf",
         "OweMe-001-statement.pdf",
+        "OweMe-report-2026-11-06.pdf",
       ]);
       for (const file of files) {
         expect(file.type).toBe("application/pdf");

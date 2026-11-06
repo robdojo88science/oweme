@@ -25,10 +25,10 @@ export default function RemindersPage({
       ),
     },
     {
-      title: "Mercy · admin only",
+      title: "Courtesy · late",
       rows: rows.filter((r) => r.status === "Mercy"),
     },
-    { title: "Overdue", rows: rows.filter((r) => r.status === "Overdue") },
+    { title: "Overdue", rows: rows.filter((r) => r.item.dueDate < date) },
   ];
   async function share(text: string) {
     try {
@@ -67,14 +67,50 @@ export default function RemindersPage({
       </div>
       <div className="alert" style={{ marginBottom: 25 }}>
         Reminders are checked when OweMe opens. Add official due dates to your
-        calendar for device reminders. Private grace details stay inside the
-        admin app.
+        calendar for device reminders. Courtesy is an internal reminder window;
+        every payment after its contractual due date is late.
       </div>
+      {groups[0].rows.length > 0 && (
+        <div
+          className="alert amber"
+          role="status"
+          style={{
+            marginBottom: 24,
+            display: "flex",
+            flexWrap: "wrap",
+            justifyContent: "space-between",
+            alignItems: "center",
+            gap: 12,
+          }}
+        >
+          <span>
+            <strong>{groups[0].rows.length} installments due today</strong> ·{" "}
+            {formatMoney(
+              groups[0].rows.reduce(
+                (sum, row) => sum + row.item.amountDue - row.item.amountPaid,
+                0,
+              ),
+            )}{" "}
+            remaining
+          </span>
+          <button
+            className="button small"
+            onClick={() => actions.payment(groups[0].rows[0].loan.id)}
+          >
+            Record payment
+          </button>
+        </div>
+      )}
+      <p className="caption" style={{ marginBottom: 20 }}>
+        Advance indicators: 7, 3, and 1 day before the agreed due date. Courtesy
+        items are also included in Overdue totals.
+      </p>
       {groups.map((g) => (
         <section className="reminder-group" key={g.title}>
           <div className="section-title">
             <h2>
-              {g.title} {g.title.startsWith("Mercy") && <Help topic="mercy" />}
+              {g.title}{" "}
+              {g.title.startsWith("Courtesy") && <Help topic="mercy" />}
             </h2>
             <span className="caption">
               {g.rows.length} installments ·{" "}
@@ -120,6 +156,16 @@ export default function RemindersPage({
                               ? ` · ${daysBetween(r.item.dueDate, date)} days past due`
                               : ""}
                           </p>
+                          {r.item.dueDate > date && (
+                            <span
+                              className={`status ${[7, 3, 1].includes(daysBetween(date, r.item.dueDate)) ? "upcoming" : "purple"}`}
+                              style={{ marginTop: 7 }}
+                            >
+                              {daysBetween(date, r.item.dueDate) === 1
+                                ? "1-day reminder · tomorrow"
+                                : `${daysBetween(date, r.item.dueDate)}-day reminder`}
+                            </span>
+                          )}
                         </div>
                       </div>
                       <div>

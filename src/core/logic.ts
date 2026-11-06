@@ -7,6 +7,7 @@ import type {
 } from "./model";
 
 export const defaultScoring: ScoringSettings = {
+  thresholds: [95, 85, 70, 50],
   onTime: 100,
   withinGrace: 85,
   lateBase: 70,
@@ -140,6 +141,7 @@ export interface LoanQuoteInput {
   interestMode: InterestMode;
   amount?: number;
   inputMode?: "face" | "cash";
+  affordabilityPercent?: number;
 }
 export function quoteLoan(input: LoanQuoteInput) {
   const { income, term, rate, interestMode } = input;
@@ -148,7 +150,16 @@ export function quoteLoan(input: LoanQuoteInput) {
   const bp = rateBasisPoints(rate);
   if (interestMode === "upfront" && bp >= 10000)
     throw new Error("Upfront interest must be below 100%.");
-  const maxFace = assertCents(income * term);
+  const factor = input.affordabilityPercent ?? 100;
+  if (!Number.isFinite(factor) || factor <= 0 || factor > 100)
+    throw new Error(
+      "Affordability percentage must be greater than 0 and at most 100.",
+    );
+  const maxFace = mulDivRound(
+    assertCents(income * term),
+    Math.round(factor * 100),
+    10000,
+  );
   const amount = assertCents(input.amount ?? maxFace);
   const cashInput =
     input.inputMode === "cash" ||
@@ -197,6 +208,7 @@ export interface AdvanceQuoteInput {
   mode: "merge" | "separate";
   releaseDate: string;
   graceDays: number;
+  affordabilityPercent?: number;
 }
 export function quoteAdvance(input: AdvanceQuoteInput) {
   assertCents(input.balance, "Carried balance");
@@ -297,9 +309,11 @@ export function allocatePayment(
 export function installmentScore(
   item: Installment,
   asOf = today(),
-  scoring: ScoringSettings = defaultScoring,
+  _scoring: ScoringSettings = defaultScoring,
 ): number | null {
+  void _scoring;
   if (item.amountDue === 0) return null;
+  if (item.dueDate > asOf) return null;
   if (item.frozenScore !== undefined) return item.frozenScore;
   if (item.status === "rolled_over") return null;
   if (
@@ -307,15 +321,10 @@ export function installmentScore(
     item.paidDate &&
     item.paidDate <= asOf
   ) {
-    if (item.paidDate <= item.dueDate) return scoring.onTime;
-    if (item.paidDate <= item.graceUntil) return scoring.withinGrace;
-    return Math.max(
-      scoring.minimum,
-      scoring.lateBase -
-        scoring.latePerDay * daysBetween(item.graceUntil, item.paidDate),
-    );
+    return item.paidDate <= item.dueDate ? 100 : 0;
   }
-  return asOf > item.graceUntil ? 0 : null;
+  // A payment after the contractual date is late, including courtesy days.
+  return 0;
 }
 export function rollOverInstallments(
   items: Installment[],
@@ -346,26 +355,72 @@ export function borrowerRating(
       (a, b) =>
         b.item.dueDate.localeCompare(a.item.dueDate) || b.item.no - a.item.no,
     );
-  if (!scored.length) return { score: null, stars: null, count: 0 };
-  let weighted = 0,
-    weights = 0;
-  scored.forEach((x, n) => {
-    const w = scoring.recency ** n;
-    weighted += (x.score ?? 0) * w;
-    weights += w;
-  });
-  const score = weighted / weights;
+  const settledLoans = loans.filter(
+    (loan) => loan.status === "completed",
+  ).length;
+  if (!scored.length)
+    return {
+      score: null,
+      stars: null,
+      count: 0,
+      onTime: 0,
+      late: 0,
+      averageDaysLate: 0,
+      settledLoans,
+      explanation: "Not rated until an installment comes due.",
+    };
+  const onTime = scored.filter((x) => x.score === 100).length;
+  const lateItems = scored.filter((x) => x.score !== 100);
+  const score = (onTime / scored.length) * 100;
+  const thresholds = scoring.thresholds ?? [95, 85, 70, 50];
+  const stars =
+    score >= thresholds[0]
+      ? 5
+      : score >= thresholds[1]
+        ? 4
+        : score >= thresholds[2]
+          ? 3
+          : score >= thresholds[3]
+            ? 2
+            : 1;
+  const averageDaysLate = lateItems.length
+    ? lateItems.reduce(
+        (sum, { item }) =>
+          sum +
+          Math.max(
+            0,
+            daysBetween(
+              item.dueDate,
+              item.paidDate && item.paidDate <= asOf
+                ? item.paidDate
+                : (item.frozenAt ?? asOf),
+            ),
+          ),
+        0,
+      ) / lateItems.length
+    : 0;
   return {
     score,
-    stars: Math.max(0.5, Math.min(5, Math.round(score / 10) / 2)),
+    stars,
     count: scored.length,
+    onTime,
+    late: lateItems.length,
+    averageDaysLate,
+    settledLoans,
+    explanation: `${onTime} of ${scored.length} due installments fully paid by their contractual date (${Math.round(score)}%). Courtesy days do not count as on time.`,
   };
 }
 export function borrowerNumber(id: number, prefix = ""): string {
   return prefix + String(id).padStart(3, "0");
 }
-export function transactionNumber(date: string, sequence: number): string {
+export function transactionNumber(
+  date: string,
+  sequence: number,
+  kind?: "PAY" | "DIS" | "REV" | "ADJ",
+): string {
   dateValue(date);
+  if (kind)
+    return `OWM-${kind}-${date.slice(0, 4)}-${String(sequence).padStart(6, "0")}`;
   return `OM-${date.replaceAll("-", "")}-${String(sequence).padStart(4, "0")}`;
 }
 export function canDeleteBorrower(
@@ -379,5 +434,7 @@ export function canClearAll(
   backupSaved: boolean,
   heldMs: number,
 ): boolean {
-  return confirmation === "DELETE ALL DATA" && backupSaved && heldMs >= 3000;
+  return (
+    confirmation === "CLEAR ALL OWEME DATA" && backupSaved && heldMs >= 3000
+  );
 }

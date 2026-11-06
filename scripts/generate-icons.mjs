@@ -16,7 +16,7 @@ for (const [width, height] of [
 ]) {
   const size = Math.round(width * 0.22);
   const icon = await sharp("public/icon.svg").resize(size).png().toBuffer();
-  await sharp({ create: { width, height, channels: 4, background: "#FAFAFB" } })
+  await sharp({ create: { width, height, channels: 4, background: "#F7F8FB" } })
     .composite([
       {
         input: icon,

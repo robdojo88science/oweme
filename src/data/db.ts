@@ -20,7 +20,13 @@ export function metadata(id: string = crypto.randomUUID()) {
 export const defaultSettings: Settings = {
   ...metadata("settings"),
   business: { name: "OweMe", address: "" },
-  defaults: { rate: 0.1, maxTerm: 3, graceDays: 5, interestMode: "upfront" },
+  defaults: {
+    rate: 0.1,
+    maxTerm: 3,
+    graceDays: 5,
+    interestMode: "upfront",
+    affordabilityPercent: 30,
+  },
   scoring: defaultScoring,
   backup: {},
   haptics: true,
@@ -75,9 +81,21 @@ export async function initDB() {
   });
 }
 export async function saveSettings(settings: Settings) {
-  await db.settings.put({
-    ...settings,
-    id: "settings",
-    updatedAt: new Date().toISOString(),
+  await db.transaction("rw", [db.settings, db.auditLogs], async () => {
+    const current = await db.settings.get("settings");
+    await db.settings.put({
+      ...settings,
+      loanDrafts: current?.loanDrafts,
+      id: "settings",
+      updatedAt: new Date().toISOString(),
+    });
+    await db.auditLogs.add({
+      ...metadata(),
+      at: new Date().toISOString(),
+      action: "SETTINGS_UPDATED",
+      entity: "settings",
+      entityId: "settings",
+      detail: "Workspace settings updated.",
+    });
   });
 }

@@ -1,5 +1,5 @@
 import Dexie from "dexie";
-import { db } from "../data/db";
+import { db, metadata } from "../data/db";
 import { today } from "../core/logic";
 import type {
   BackupData,
@@ -16,8 +16,15 @@ import {
   encodeValue,
   mergeBackupData,
   parseBackup,
+  sealBackup,
 } from "./format";
 export * from "./format";
+import {
+  accountingTotals,
+  assertLedgerConsistency,
+  FinancialMergeConflict,
+} from "./consistency";
+import type { AccountingTotals } from "./consistency";
 
 export async function readBackupData(): Promise<BackupData> {
   const entries = await Promise.all(
@@ -35,15 +42,17 @@ export async function exportBackup(lite = false): Promise<string> {
     readBackupData,
   );
   return JSON.stringify(
-    await encodeValue(
-      {
-        app: "OweMe",
-        schemaVersion: BACKUP_VERSION,
-        exportedAt: new Date().toISOString(),
+    sealBackup(
+      await encodeValue(
+        {
+          app: "OweMe",
+          schemaVersion: BACKUP_VERSION,
+          exportedAt: new Date().toISOString(),
+          lite,
+          tables,
+        },
         lite,
-        tables,
-      },
-      lite,
+      ),
     ),
   );
 }
@@ -83,19 +92,39 @@ export async function updateBackupStatus(
 
 export async function previewImport(json: string): Promise<ImportPreview> {
   const backup = parseBackup(json);
+  assertNotebookConfiguration(backup.tables);
+  assertLedgerConsistency(backup.tables);
   const local = await readBackupData();
-  const { summary } = mergeBackupData(local, backup.tables);
+  let conflicts: string[] = [],
+    mergeBlocked: string | undefined;
+  let merged: ReturnType<typeof accountingTotals> | undefined;
+  try {
+    const result = mergeBackupData(local, backup.tables);
+    assertLedgerConsistency(result.tables);
+    conflicts = result.summary.conflicts;
+    merged = accountingTotals(result.tables);
+  } catch (error) {
+    if (!(error instanceof FinancialMergeConflict)) throw error;
+    mergeBlocked = error.message;
+  }
   const dates = backup.tables.transactions
     .map((transaction) => String(transaction.date))
     .sort();
   return {
     backup,
+    integrity: backup.checksum ? "verified" : "legacy",
     exportedAt: backup.exportedAt,
     lite: backup.lite,
     counts: Object.fromEntries(
       BACKUP_TABLES.map((table) => [table, backup.tables[table].length]),
     ) as Record<BackupTable, number>,
-    conflicts: summary.conflicts,
+    conflicts,
+    mergeBlocked,
+    accounting: {
+      local: accountingTotals(local),
+      incoming: accountingTotals(backup.tables),
+      merged,
+    },
     from: dates[0],
     to: dates.at(-1),
   };
@@ -105,19 +134,31 @@ export async function previewImport(json: string): Promise<ImportPreview> {
 export async function importBackup(
   backup: BackupFile,
   mode: "merge" | "replace",
+  expectedLocalTotals?: AccountingTotals,
 ): Promise<ImportSummary> {
   const validated = parseBackup(JSON.stringify(await encodeValue(backup)));
+  assertNotebookConfiguration(validated.tables);
+  assertLedgerConsistency(validated.tables);
   return db.transaction(
     "rw",
     [...BACKUP_TABLES.map((name) => db.table(name)), db.snapshots],
     async () => {
       const local = await readBackupData();
+      if (
+        expectedLocalTotals &&
+        JSON.stringify(accountingTotals(local)) !==
+          JSON.stringify(expectedLocalTotals)
+      )
+        throw new FinancialMergeConflict(
+          "the local accounting totals changed after this preview. Close this dialog and select the backup again to review fresh totals.",
+        );
       const { tables, summary } = mergeBackupData(
         local,
         validated.tables,
         mode === "replace",
         validated.lite && mode === "merge",
       );
+      assertLedgerConsistency(tables);
       const now = new Date().toISOString();
       const snapshotJson = JSON.stringify(
         await Dexie.waitFor(
@@ -150,9 +191,29 @@ export async function importBackup(
         if (tables[table].length)
           await db.table<BackupRecord>(table).bulkPut(tables[table]);
       }
+      await db.auditLogs.add({
+        ...metadata(),
+        at: now,
+        action: "BACKUP_IMPORT",
+        entity: "backup",
+        entityId: "notebook",
+        detail: `${mode === "replace" ? "Replaced" : "Merged"} notebook from ${validated.exportedAt}; ${summary.added} added, ${summary.updated} updated, ${summary.conflicts.length} numbered-record conflicts. Integrity ${validated.checksum ? "verified" : "legacy file without checksum"}.`,
+      });
       return summary;
     },
   );
+}
+
+function assertNotebookConfiguration(tables: BackupData): void {
+  if (
+    tables.settings.length !== 1 ||
+    tables.settings[0].id !== "settings" ||
+    tables.counters.length !== 1 ||
+    tables.counters[0].id !== "counters"
+  )
+    throw new Error(
+      "This backup is incomplete: one settings record and one counters record are required. Restore a complete OweMe export. Your current notebook is unchanged.",
+    );
 }
 
 type SavePicker = (options: {
@@ -183,6 +244,7 @@ export async function saveLocalBackup(lite = false): Promise<void> {
     const blob = new Blob([json], { type: "application/json" });
     const file = new File([blob], filename, { type: blob.type });
     const browser = window as Window & { showSaveFilePicker?: SavePicker };
+    let verified = false;
     if (
       browser.showSaveFilePicker &&
       !/Android|iPhone|iPad/i.test(navigator.userAgent)
@@ -199,12 +261,26 @@ export async function saveLocalBackup(lite = false): Promise<void> {
       const writer = await rememberedHandle.createWritable();
       await writer.write(blob);
       await writer.close();
-    } else if (navigator.canShare?.({ files: [file] }))
+      verified = true;
+    } else if (navigator.canShare?.({ files: [file] })) {
       await navigator.share({ title: "OweMe backup", files: [file] });
-    else downloadFile(blob, filename);
+      verified = true;
+    } else downloadFile(blob, filename);
+    const completedAt = new Date().toISOString();
     await updateBackupStatus({
-      lastSuccess: new Date().toISOString(),
+      ...(verified
+        ? { lastSuccess: completedAt, lastLocalVerified: completedAt }
+        : {}),
+      lastLocalExport: completedAt,
       lastError: undefined,
+    });
+    await db.auditLogs.add({
+      ...metadata(),
+      at: completedAt,
+      action: "BACKUP_EXPORT",
+      entity: "backup",
+      entityId: "notebook",
+      detail: `${lite ? "Lite" : "Full"} portable backup ${verified ? "written to chosen file or handed to the system share sheet" : "download requested; owner must confirm the saved file"}.`,
     });
   } catch (error) {
     if (error instanceof DOMException && error.name === "AbortError")

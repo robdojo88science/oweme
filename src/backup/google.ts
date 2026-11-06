@@ -38,6 +38,23 @@ let accessToken: string | undefined;
 let tokenExpiresAt = 0;
 let scopes = new Set<string>();
 let libraryPromise: Promise<void> | undefined;
+let accountLabel: string | undefined;
+
+export function googleAccount(): string | undefined {
+  return isGoogleConnected() ? accountLabel : undefined;
+}
+
+/** Account identity comes from Drive itself using the existing drive.file permission. */
+export async function readGoogleAccount(): Promise<string | undefined> {
+  const response = await googleFetch(
+    "https://www.googleapis.com/drive/v3/about?fields=user(displayName,emailAddress)",
+  );
+  const info = (await response.json()) as {
+    user?: { displayName?: string; emailAddress?: string };
+  };
+  accountLabel = info.user?.emailAddress || info.user?.displayName;
+  return accountLabel;
+}
 
 function loadIdentity(): Promise<void> {
   if ((window as GoogleWindow).google?.accounts.oauth2)
@@ -112,6 +129,7 @@ export async function connectGoogle(
           return;
         }
         accessToken = response.access_token;
+        accountLabel = undefined;
         tokenExpiresAt =
           Date.now() +
           Math.max(0, Number(response.expires_in || 3600) - 30) * 1000;
@@ -155,6 +173,7 @@ export function disconnectGoogle(): void {
   accessToken = undefined;
   tokenExpiresAt = 0;
   scopes = new Set();
+  accountLabel = undefined;
 }
 
 async function googleFetch(
@@ -291,9 +310,34 @@ export type DriveSyncResult =
   | { kind: "remote-newer"; modifiedTime: string; preview: ImportPreview };
 let pendingSync: Promise<DriveSyncResult> | undefined;
 
+async function notebookRevision(): Promise<string> {
+  const rows = await Promise.all(
+    [
+      "borrowers",
+      "loans",
+      "transactions",
+      "notes",
+      "signerProfiles",
+      "tombstones",
+      "settings",
+    ].map((table) => db.table(table).toArray()),
+  );
+  return JSON.stringify(
+    rows.map((table) =>
+      table
+        .map((row) => ({ id: row.id, updatedAt: row.updatedAt }))
+        .sort((a, b) => String(a.id).localeCompare(String(b.id))),
+    ),
+  );
+}
+
 export function syncDrive(): Promise<DriveSyncResult> {
   pendingSync ??= (async () => {
     try {
+      if (typeof navigator !== "undefined" && navigator.onLine === false)
+        throw new Error(
+          "Offline. Changes are saved locally; Drive backup is queued until you reconnect.",
+        );
       const existing = await findDriveFile();
       const settings = await db.settings.get("settings");
       if (
@@ -311,11 +355,23 @@ export function syncDrive(): Promise<DriveSyncResult> {
           preview: await previewImport(await response.text()),
         };
       }
+      const beforeUpload = await notebookRevision();
       const metadata = await uploadDrive(await exportBackup(), existing);
+      if (
+        !metadata.id ||
+        !Number.isFinite(Date.parse(metadata.modifiedTime)) ||
+        (existing && metadata.id !== existing.id)
+      )
+        throw new Error(
+          "Drive did not confirm the expected backup file and revision. Check Drive before retrying.",
+        );
+      const changedDuringUpload = beforeUpload !== (await notebookRevision());
       await updateBackupStatus({
         driveFileId: metadata.id,
         lastSync: metadata.modifiedTime,
         lastSuccess: new Date().toISOString(),
+        lastDriveSuccess: new Date().toISOString(),
+        pendingDrive: changedDuringUpload,
         lastError: undefined,
       });
       return {
@@ -324,6 +380,7 @@ export function syncDrive(): Promise<DriveSyncResult> {
       };
     } catch (error) {
       await updateBackupStatus({
+        pendingDrive: true,
         lastError:
           error instanceof Error ? error.message : "Drive backup failed",
       });
@@ -349,7 +406,11 @@ export async function restoreDrive(): Promise<ImportPreview> {
 export async function mergeDriveBackup(
   result: Extract<DriveSyncResult, { kind: "remote-newer" }>,
 ): Promise<ImportSummary> {
-  const summary = await importBackup(result.preview.backup, "merge");
+  const summary = await importBackup(
+    result.preview.backup,
+    "merge",
+    result.preview.accounting?.local,
+  );
   await updateBackupStatus({ lastSync: result.modifiedTime });
   return summary;
 }
@@ -493,6 +554,7 @@ export function startAutoBackup(
   }).subscribe({
     next(fingerprint) {
       if (fingerprint !== lastFingerprint) {
+        if (lastFingerprint) void updateBackupStatus({ pendingDrive: true });
         lastFingerprint = fingerprint;
         remotePending = false;
         schedule();

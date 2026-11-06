@@ -19,8 +19,8 @@ import {
   Cloud,
   Home,
   LoaderCircle,
+  MoreHorizontal,
   Plus,
-  Search,
   Settings2,
   ShieldCheck,
   Users,
@@ -40,6 +40,11 @@ import HistoryPage from "./ui/HistoryPage";
 import RemindersPage from "./ui/RemindersPage";
 import { CalculatorPage } from "./ui/CalculatorPage";
 import { SettingsPage } from "./ui/SettingsPage";
+import MorePage from "./ui/MorePage";
+import ReportsPage from "./ui/ReportsPage";
+import DocumentsPage from "./ui/DocumentsPage";
+import ActivityPage from "./ui/ActivityPage";
+import { GlobalSearch } from "./ui/GlobalSearch";
 import {
   AddSignatureDialog,
   BorrowerForm,
@@ -74,8 +79,8 @@ const navItems = [
   { to: "/", label: "Home", icon: Home },
   { to: "/borrowers", label: "Borrowers", icon: Users },
   { to: "/calculator", label: "Calculator", icon: Calculator },
-  { to: "/history", label: "History", icon: Clock3 },
-  { to: "/settings", label: "Settings", icon: Settings2 },
+  { to: "/history", label: "Transactions", icon: Clock3 },
+  { to: "/more", label: "More", icon: MoreHorizontal },
 ];
 function BorrowerRoute({
   data,
@@ -258,13 +263,32 @@ export default function App() {
     : location.pathname.startsWith("/calculator")
       ? "Calculator"
       : location.pathname.startsWith("/history")
-        ? "History"
+        ? "Transactions"
         : location.pathname.startsWith("/settings")
           ? "Settings"
-          : location.pathname.startsWith("/reminders")
-            ? "Reminders"
-            : "Overview";
+          : location.pathname.startsWith("/reports")
+            ? "Reports"
+            : location.pathname.startsWith("/documents")
+              ? "Agreements & receipts"
+              : location.pathname.startsWith("/activity")
+                ? "Activity"
+                : location.pathname.startsWith("/backups")
+                  ? "Backups"
+                  : location.pathname.startsWith("/more")
+                    ? "More"
+                    : location.pathname.startsWith("/reminders")
+                      ? "Reminders"
+                      : "Overview";
   const asOf = today();
+  const moreSection = [
+    "/more",
+    "/reports",
+    "/documents",
+    "/activity",
+    "/backups",
+    "/settings",
+    "/reminders",
+  ].some((path) => location.pathname.startsWith(path));
   const dueCount = data.loans
     .filter((l) => l.status === "active")
     .flatMap((l) => l.installments)
@@ -294,16 +318,19 @@ export default function App() {
         <NavLink className="brand" to="/">
           <img src={`${import.meta.env.BASE_URL}icon.svg`} alt="" />
           <span>
-            Owe<span style={{ color: "#5b5cff" }}>Me</span>
+            Owe<span style={{ color: "#6b4eff" }}>Me</span>
           </span>
         </NavLink>
         <div className="nav-label">YOUR WORKSPACE</div>
         <nav aria-label="Main navigation">
-          {navItems.slice(0, 4).map((n) => (
+          {navItems.map((n) => (
             <NavLink
-              className="nav-link"
+              className={({ isActive }) =>
+                `nav-link ${isActive || (n.to === "/more" && moreSection) ? "active" : ""}`
+              }
               key={n.to}
               to={n.to}
+              aria-label={n.label}
               end={n.to === "/"}
             >
               <n.icon />
@@ -312,23 +339,24 @@ export default function App() {
           ))}
         </nav>
         <div className="nav-divider" />
-        <NavLink className="nav-link" to="/reminders">
+        <NavLink className="nav-link" to="/reminders" aria-label="Reminders">
           <Bell />
           <span>Reminders</span>
           {dueCount > 0 && <small className="count">{dueCount}</small>}
         </NavLink>
         <div className="sidebar-bottom">
-          <NavLink className="nav-link" to="/settings">
+          <NavLink className="nav-link" to="/settings" aria-label="Settings">
             <Settings2 />
             <span>Settings</span>
           </NavLink>
           <button
             className="nav-link"
+            aria-label="Backups"
             style={{ width: "100%" }}
-            onClick={() => nav("/settings")}
+            onClick={() => nav("/backups")}
           >
             <Cloud />
-            <span>Backup & Sync</span>
+            <span>Backups</span>
           </button>
           <div className="local-card">
             <ShieldCheck size={19} />
@@ -336,7 +364,7 @@ export default function App() {
             <p>
               Private, offline, and always
               <br />
-              within reach. Just like it should be.
+              backed up by you.
             </p>
           </div>
           <div className="user-mini">
@@ -360,21 +388,13 @@ export default function App() {
             <b>{section}</b>
           </div>
           <div className="top-actions">
-            <div className="global-search">
-              <Search size={16} />
-              <input
-                ref={searchRef}
-                aria-label="Global search"
-                placeholder="Find anything in your notebook…"
-                value={query}
-                onChange={(e) => {
-                  setQuery(e.target.value);
-                  if (!location.pathname.startsWith("/borrowers"))
-                    nav("/borrowers");
-                }}
-              />
-              <kbd>⌘ K</kbd>
-            </div>
+            <GlobalSearch
+              data={data}
+              actions={actions}
+              query={query}
+              onQuery={setQuery}
+              inputRef={searchRef}
+            />
             <button
               className="icon-button"
               aria-label="Open reminders"
@@ -469,6 +489,24 @@ export default function App() {
               element={<HistoryPage data={data} actions={actions} />}
             />
             <Route
+              path="/transactions"
+              element={<Navigate to="/history" replace />}
+            />
+            <Route path="/more" element={<MorePage data={data} />} />
+            <Route
+              path="/reports"
+              element={<ReportsPage data={data} actions={actions} />}
+            />
+            <Route
+              path="/documents"
+              element={<DocumentsPage data={data} actions={actions} />}
+            />
+            <Route path="/activity" element={<ActivityPage data={data} />} />
+            <Route
+              path="/backups"
+              element={<Navigate to="/settings?section=backup" replace />}
+            />
+            <Route
               path="/reminders"
               element={<RemindersPage data={data} actions={actions} />}
             />
@@ -504,7 +542,14 @@ export default function App() {
       </div>
       <nav className="mobile-nav" aria-label="Mobile navigation">
         {navItems.map((n) => (
-          <NavLink key={n.to} to={n.to} end={n.to === "/"}>
+          <NavLink
+            key={n.to}
+            to={n.to}
+            end={n.to === "/"}
+            className={({ isActive }) =>
+              isActive || (n.to === "/more" && moreSection) ? "active" : ""
+            }
+          >
             <n.icon />
             <span>{n.label}</span>
           </NavLink>

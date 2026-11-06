@@ -131,6 +131,31 @@ describe("borrower search", () => {
   it("normalizes decomposed accents as well as precomposed letters", () => {
     expect(normalize("JOSE\u0301")).toBe("jose");
   });
+  it("finds aliases, barangays, document names, external references, and middle substrings", () => {
+    const borrower = { ...juan, alias: "Aling Café", barangay: "San Isidro" };
+    const agreement = {
+      ...loan,
+      documents: [
+        {
+          id: "doc1",
+          name: "Signed release November.pdf",
+          file: new Blob(["paper"], { type: "application/pdf" }),
+          addedAt: at,
+        },
+      ],
+    };
+    const payment = { ...transaction, referenceNo: "GCASH-ABC9854" };
+    const find = buildSearch([borrower], [agreement], [payment]);
+    for (const query of [
+      "Aling cafe",
+      "ISIDRO",
+      "November.pdf",
+      "ABC9854",
+      "9854",
+      "ela   cru",
+    ])
+      expect(find(query)?.has(juan.id)).toBe(true);
+  });
   it("narrows an exact ID instead of hiding it behind fuzzy numeric matches", () => {
     const people = [5, 50, 500, 1500, 4500, 4990, 5000].map((number) =>
       person(number),

@@ -63,8 +63,8 @@ export default function HistoryPage({
     <>
       <div className="page-heading">
         <div>
-          <h1>History</h1>
-          <p>The full story, one transaction at a time.</p>
+          <h1>Transactions</h1>
+          <p>Every release, repayment and correction. Clearly recorded.</p>
         </div>
         <span className="status">Permanent ledger</span>
       </div>

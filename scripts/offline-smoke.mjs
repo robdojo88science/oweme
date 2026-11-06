@@ -103,10 +103,16 @@ try {
     .click();
   await page.getByRole("heading", { name, exact: true }).waitFor();
   await page.getByRole("button", { name: "New loan", exact: true }).click();
+  await dialog()
+    .getByLabel("Loan affordability percentage", { exact: true })
+    .fill("100");
   await dialog().getByLabel("Loan amount", { exact: true }).fill("3000");
   await dialog().getByLabel("Term in months", { exact: true }).fill("3");
   await dialog().getByLabel("Release date", { exact: true }).fill("2026-11-05");
   await dialog().getByLabel("Released by", { exact: true }).fill("Offline QA");
+  await dialog()
+    .getByRole("checkbox", { name: /I reviewed the agreement and confirm/ })
+    .check();
   await dialog()
     .getByRole("button", { name: "Release loan", exact: true })
     .click();
@@ -121,7 +127,7 @@ try {
   report.offlineReload = !(await page.evaluate(() => navigator.onLine));
   await page.goto(baseURL + "#/calculator");
   await page
-    .getByRole("heading", { name: "Make the numbers clear.", exact: true })
+    .getByRole("heading", { name: "Loan calculator", level: 1, exact: true })
     .waitFor();
   report.calculatorOffline = true;
   await page.goto(baseURL + "#/borrowers");
@@ -164,7 +170,7 @@ try {
   });
   await closeDialog();
   await page.reload();
-  await expect(page.locator(".profile-metrics")).toContainText("₱2,500.00");
+  await expect(page.locator(".profile-metrics").first()).toContainText("₱2,500.00");
   report.finalBalance = "₱2,500.00";
   assert.deepEqual(errors, []);
   await writeFile(

@@ -1,3 +1,5 @@
+import { assertSafeFinancialMerge } from "./consistency";
+import type { AccountingTotals } from "./consistency";
 /** Versioned, self-contained JSON. No credentials or access tokens are serialized. */
 export const BACKUP_VERSION = 1;
 export const BACKUP_TABLES = [
@@ -25,6 +27,8 @@ export interface BackupFile {
   exportedAt: string;
   lite: boolean;
   tables: BackupData;
+  counts?: Record<BackupTable, number>;
+  checksum?: { algorithm: "CRC32"; value: string };
 }
 export interface ImportSummary {
   added: number;
@@ -40,6 +44,13 @@ export interface ImportPreview {
   to?: string;
   exportedAt: string;
   lite: boolean;
+  integrity?: "verified" | "legacy";
+  mergeBlocked?: string;
+  accounting?: {
+    local: AccountingTotals;
+    incoming: AccountingTotals;
+    merged?: AccountingTotals;
+  };
 }
 
 const object = (value: unknown): value is Record<string, unknown> =>
@@ -64,6 +75,50 @@ const snapshot = (value: unknown): boolean =>
   nonempty(value.fullName);
 function requireValue(valid: boolean, message: string): asserts valid {
   if (!valid) throw new Error(`Invalid backup: ${message}`);
+}
+
+function canonicalJSON(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(canonicalJSON).join(",")}]`;
+  if (object(value))
+    return `{${Object.keys(value)
+      .sort()
+      .filter((key) => value[key] !== undefined)
+      .map((key) => `${JSON.stringify(key)}:${canonicalJSON(value[key])}`)
+      .join(",")}}`;
+  return JSON.stringify(value) ?? "null";
+}
+
+/** CRC32 detects accidental corruption. It is not encryption or an authenticity signature. */
+export function backupChecksum(encoded: unknown): string {
+  requireValue(object(encoded), "backup envelope");
+  const payload = { ...encoded };
+  delete payload.checksum;
+  let crc = 0xffffffff;
+  for (const byte of new TextEncoder().encode(canonicalJSON(payload))) {
+    crc ^= byte;
+    for (let bit = 0; bit < 8; bit++)
+      crc = (crc >>> 1) ^ (crc & 1 ? 0xedb88320 : 0);
+  }
+  return ((crc ^ 0xffffffff) >>> 0).toString(16).padStart(8, "0");
+}
+
+/** Add counts and integrity after all portable attachments have been encoded. */
+export function sealBackup(encoded: unknown): unknown {
+  requireValue(object(encoded) && object(encoded.tables), "backup tables");
+  const tables = encoded.tables;
+  const payload = {
+    ...encoded,
+    counts: Object.fromEntries(
+      BACKUP_TABLES.map((table) => [
+        table,
+        Array.isArray(tables[table]) ? tables[table].length : 0,
+      ]),
+    ),
+  };
+  return {
+    ...payload,
+    checksum: { algorithm: "CRC32", value: backupChecksum(payload) },
+  };
 }
 
 export function bytesToBase64(bytes: Uint8Array): string {
@@ -116,7 +171,9 @@ function decodeValue(value: unknown): unknown {
       "invalid embedded image",
     );
     requireValue(
-      value.type.startsWith("image/") || value.type === "",
+      value.type.startsWith("image/") ||
+        value.type === "application/pdf" ||
+        value.type === "",
       "unsupported embedded file type",
     );
     return new Blob([base64ToBytes(value.$blob)], { type: value.type });
@@ -169,6 +226,18 @@ function validateRecord(
       requireValue(integer(value.graceDaysOverride), "borrower grace override");
   }
   if (table === "loans") {
+    if (value.documents !== undefined) {
+      requireValue(Array.isArray(value.documents), "loan documents");
+      for (const document of value.documents)
+        requireValue(
+          object(document) &&
+            nonempty(document.id) &&
+            nonempty(document.name) &&
+            timestamp(document.addedAt) &&
+            (document.file === undefined || document.file instanceof Blob),
+          "loan document evidence",
+        );
+    }
     requireValue(
       nonempty(value.borrowerId) &&
         nonempty(value.loanNo) &&
@@ -295,6 +364,42 @@ function validateRecord(
         object(value.backup),
       "settings fields",
     );
+    if (value.loanDrafts !== undefined) {
+      requireValue(Array.isArray(value.loanDrafts), "saved loan drafts");
+      const draftIds = new Set<string>();
+      for (const draft of value.loanDrafts) {
+        requireValue(
+          object(draft) &&
+            nonempty(draft.id) &&
+            !draftIds.has(draft.id) &&
+            timestamp(draft.createdAt) &&
+            timestamp(draft.updatedAt) &&
+            nonempty(draft.borrowerId) &&
+            typeof draft.advance === "boolean" &&
+            ["merge", "separate"].includes(String(draft.advanceMode)) &&
+            ["upfront", "added"].includes(String(draft.interestMode)) &&
+            ["face", "cash"].includes(String(draft.inputMode)) &&
+            typeof draft.term === "number" &&
+            Number.isFinite(draft.term) &&
+            typeof draft.overrideCap === "boolean" &&
+            object(draft.signatures) &&
+            [
+              "income",
+              "affordabilityPercent",
+              "maximumTerm",
+              "rate",
+              "amount",
+              "releaseDate",
+              "releasedBy",
+              "notes",
+              "overrideReason",
+              "witness",
+            ].every((key) => typeof draft[key] === "string"),
+          "saved loan draft fields",
+        );
+        draftIds.add(draft.id);
+      }
+    }
     requireValue(
       typeof value.defaults.rate === "number" &&
         value.defaults.rate >= 0 &&
@@ -307,6 +412,26 @@ function validateRecord(
         ["upfront", "added"].includes(String(value.defaults.interestMode)),
       "default loan settings",
     );
+    if (value.defaults.affordabilityPercent !== undefined)
+      requireValue(
+        typeof value.defaults.affordabilityPercent === "number" &&
+          value.defaults.affordabilityPercent > 0 &&
+          value.defaults.affordabilityPercent <= 100,
+        "affordability percentage",
+      );
+    if (value.scoring.thresholds !== undefined)
+      requireValue(
+        Array.isArray(value.scoring.thresholds) &&
+          value.scoring.thresholds.length === 4 &&
+          value.scoring.thresholds.every(
+            (threshold, index, all) =>
+              typeof threshold === "number" &&
+              threshold >= 0 &&
+              threshold <= 100 &&
+              (index === 0 || threshold <= all[index - 1]),
+          ),
+        "rating thresholds",
+      );
     requireValue(
       [
         "onTime",
@@ -349,13 +474,20 @@ function validateRecord(
         Number(value.scoring[key]) >= 0 && Number(value.scoring[key]) <= 100,
         "rating range",
       );
-    for (const key of ["lastSuccess", "lastSync", "lastEmailSuccess"])
+    for (const key of [
+      "lastSuccess",
+      "lastSync",
+      "lastEmailSuccess",
+      "lastDriveSuccess",
+      "lastLocalExport",
+      "lastLocalVerified",
+    ])
       if (value.backup[key] !== undefined)
         requireValue(timestamp(value.backup[key]), `backup ${key}`);
     for (const key of ["googleClientId", "driveFileId", "email", "lastError"])
       if (value.backup[key] !== undefined)
         requireValue(typeof value.backup[key] === "string", `backup ${key}`);
-    for (const key of ["autoDrive", "emailEnabled"])
+    for (const key of ["autoDrive", "emailEnabled", "pendingDrive"])
       if (value.backup[key] !== undefined)
         requireValue(typeof value.backup[key] === "boolean", `backup ${key}`);
   }
@@ -419,6 +551,27 @@ export function parseBackup(json: string): BackupFile {
       object(parsed.tables),
     "backup header",
   );
+  if (parsed.checksum !== undefined) {
+    requireValue(
+      object(parsed.checksum) &&
+        parsed.checksum.algorithm === "CRC32" &&
+        typeof parsed.checksum.value === "string",
+      "unsupported checksum",
+    );
+    requireValue(
+      backupChecksum(parsed) === parsed.checksum.value,
+      "checksum mismatch; the file may be incomplete or altered",
+    );
+  }
+  if (parsed.counts !== undefined) {
+    requireValue(object(parsed.counts), "record counts");
+    for (const name of BACKUP_TABLES)
+      requireValue(
+        Array.isArray(parsed.tables[name]) &&
+          parsed.counts[name] === parsed.tables[name].length,
+        `${name} record count does not match`,
+      );
+  }
   const decoded = decodeValue(parsed) as Record<string, unknown>;
   const tables = decoded.tables as Record<string, unknown>;
   for (const name of BACKUP_TABLES) {
@@ -488,7 +641,14 @@ function retainExistingMedia(existing: unknown, incoming: unknown): unknown {
   if (incoming instanceof Blob) return incoming;
   if (Array.isArray(existing) && Array.isArray(incoming))
     return incoming.map((item, index) =>
-      retainExistingMedia(existing[index], item),
+      retainExistingMedia(
+        object(item) && typeof item.id === "string"
+          ? existing.find(
+              (candidate) => object(candidate) && candidate.id === item.id,
+            )
+          : existing[index],
+        item,
+      ),
     );
   if (!object(existing) || !object(incoming)) return incoming;
   // Never attach an old signature to a different signer or a different capture.
@@ -512,6 +672,7 @@ export function mergeBackupData(
   replace = false,
   preserveExistingImages = false,
 ): { tables: BackupData; summary: ImportSummary } {
+  if (!replace) assertSafeFinancialMerge(local, incoming);
   const output = emptyBackupData();
   const summary: ImportSummary = {
     added: 0,
@@ -696,6 +857,14 @@ export function mergeBackupData(
       incomingCounter?.loanByBorrower,
     );
     for (const transaction of output.transactions) {
+      const modern = /^OWM-(PAY|DIS|REV|ADJ)-(\d{4})-(\d+)/.exec(
+        String(transaction.txnNo),
+      );
+      if (modern) {
+        const counts = counter.txnByDay as Record<string, number>;
+        const key = `${modern[1]}-${modern[2]}`;
+        counts[key] = Math.max(counts[key] || 0, Number(modern[3]));
+      }
       const match = /^OM-(\d{8})-(\d+)/.exec(String(transaction.txnNo));
       if (match) {
         const day = `${match[1].slice(0, 4)}-${match[1].slice(4, 6)}-${match[1].slice(6, 8)}`;

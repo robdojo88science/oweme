@@ -5,6 +5,8 @@ import {
   connectGoogle,
   disconnectGoogle,
   isGoogleConnected,
+  googleAccount,
+  readGoogleAccount,
   mergeDriveBackup,
   sendEmailBackup,
   syncDrive,
@@ -54,6 +56,22 @@ afterEach(() => {
 });
 
 describe("Google browser backups", () => {
+  it("shows account identity only from the authorized Drive API and clears it on disconnect", async () => {
+    await connectGoogle(clientId);
+    expect(googleAccount()).toBeUndefined();
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(
+        response({
+          user: { displayName: "Owner", emailAddress: "owner@example.com" },
+        }),
+      ),
+    );
+    expect(await readGoogleAccount()).toBe("owner@example.com");
+    expect(googleAccount()).toBe("owner@example.com");
+    disconnectGoogle();
+    expect(googleAccount()).toBeUndefined();
+  });
   it("creates one named file then PATCHes the remembered file without creating duplicates", async () => {
     await connectGoogle(clientId);
     const fetchMock = vi
@@ -76,6 +94,12 @@ describe("Google browser backups", () => {
       concurrent = syncDrive();
     expect(first).toBe(concurrent);
     expect((await first).kind).toBe("backed-up");
+    expect((await db.settings.get("settings"))?.backup.pendingDrive).toBe(
+      false,
+    );
+    expect(
+      (await db.settings.get("settings"))?.backup.lastDriveSuccess,
+    ).toBeTruthy();
     expect((await db.settings.get("settings"))?.backup.driveFileId).toBe(
       "drive-file",
     );
@@ -118,6 +142,82 @@ describe("Google browser backups", () => {
     expect((await db.settings.get("settings"))?.backup.lastSync).toBe(
       remoteDate,
     );
+  });
+
+  it("queues offline changes without making a request or reporting a successful backup", async () => {
+    await connectGoogle(clientId);
+    vi.stubGlobal("navigator", { onLine: false });
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+    await expect(syncDrive()).rejects.toThrow("Offline");
+    expect(fetchMock).not.toHaveBeenCalled();
+    const backup = (await db.settings.get("settings"))?.backup;
+    expect(backup?.pendingDrive).toBe(true);
+    expect(backup?.lastDriveSuccess).toBeUndefined();
+  });
+
+  it("keeps edits made during an upload pending for the next confirmed backup", async () => {
+    await connectGoogle(clientId);
+    vi.stubGlobal(
+      "fetch",
+      vi
+        .fn()
+        .mockResolvedValueOnce(response({ files: [] }))
+        .mockImplementationOnce(async () => {
+          const at = new Date().toISOString();
+          await db.notes.add({
+            id: "during-upload",
+            borrowerId: "b1",
+            createdAt: at,
+            updatedAt: at,
+            kind: "manual",
+            text: "Saved while uploading",
+          });
+          return response({ id: "drive-file", modifiedTime: remoteDate });
+        }),
+    );
+    expect((await syncDrive()).kind).toBe("backed-up");
+    expect((await db.settings.get("settings"))?.backup.pendingDrive).toBe(true);
+  });
+
+  it("uses ETag preconditions and records conflicts without claiming success", async () => {
+    await connectGoogle(clientId);
+    await db.settings.update("settings", {
+      backup: { driveFileId: "drive-file", lastSync: remoteDate },
+    });
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({ id: "drive-file", modifiedTime: remoteDate }),
+          { headers: { ETag: "revision-a" } },
+        ),
+      )
+      .mockResolvedValueOnce(response({}, 412));
+    vi.stubGlobal("fetch", fetchMock);
+    await expect(syncDrive()).rejects.toThrow("changed on another device");
+    expect(
+      new Headers(fetchMock.mock.calls[1][1].headers).get("If-Match"),
+    ).toBe("revision-a");
+    expect(
+      (await db.settings.get("settings"))?.backup.lastDriveSuccess,
+    ).toBeUndefined();
+    expect((await db.settings.get("settings"))?.backup.pendingDrive).toBe(true);
+  });
+
+  it("does not claim success for an incomplete Drive upload response", async () => {
+    await connectGoogle(clientId);
+    vi.stubGlobal(
+      "fetch",
+      vi
+        .fn()
+        .mockResolvedValueOnce(response({ files: [] }))
+        .mockResolvedValueOnce(response({})),
+    );
+    await expect(syncDrive()).rejects.toThrow("did not confirm");
+    expect(
+      (await db.settings.get("settings"))?.backup.lastDriveSuccess,
+    ).toBeUndefined();
   });
 
   it("does not create a replacement when an already-linked Drive file becomes inaccessible", async () => {

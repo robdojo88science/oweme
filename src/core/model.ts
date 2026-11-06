@@ -15,6 +15,9 @@ export interface Borrower extends RecordMeta {
   fullName: string;
   address: string;
   contact?: string;
+  alias?: string;
+  barangay?: string;
+  registrationDate?: string;
   monthlyIncome: number;
   photo?: Blob;
   rateOverride?: number;
@@ -46,12 +49,19 @@ export interface Installment {
 export interface BorrowerSnapshot {
   numericId: number;
   fullName: string;
+  address?: string;
+  contact?: string;
 }
 export interface Loan extends RecordMeta {
+  documents?: { id: string; name: string; file: Blob; addedAt: string }[];
   loanNo: string;
   borrowerId: string;
   borrowerSnapshot: BorrowerSnapshot;
   incomeAtLoan: number;
+  affordabilityPercent?: number;
+  overrideReason?: string;
+  agreementTextSnapshot?: string;
+  businessSnapshot?: { name: string; address: string; logo?: Blob };
   termMonths: number;
   rate: number;
   interestMode: InterestMode;
@@ -63,6 +73,11 @@ export interface Loan extends RecordMeta {
   status: "active" | "completed" | "merged" | "voided";
   installments: Installment[];
   kind: "new" | "advance";
+  signatureHistory?: {
+    role: "borrower" | "admin" | "witness";
+    signature: SignatureRef;
+    replacedAt: string;
+  }[];
   parentLoanId?: string;
   mergedIntoLoanId?: string;
   carriedBalance?: number;
@@ -120,6 +135,8 @@ export interface Transaction extends RecordMeta {
   nextDueDate?: string;
 }
 export interface ScoringSettings {
+  /** Percentage thresholds for 5, 4, 3 and 2 stars; legacy score fields remain portable. */
+  thresholds?: [number, number, number, number];
   onTime: number;
   withinGrace: number;
   lateBase: number;
@@ -128,12 +145,14 @@ export interface ScoringSettings {
   recency: number;
 }
 export interface Settings extends RecordMeta {
+  loanDrafts?: LoanDraft[];
   business: { name: string; address: string; logo?: Blob };
   defaults: {
     rate: number;
     maxTerm: number;
     graceDays: number;
     interestMode: InterestMode;
+    affordabilityPercent?: number;
   };
   scoring: ScoringSettings;
   backup: {
@@ -156,6 +175,28 @@ export interface Settings extends RecordMeta {
   defaultReceivedBy: string;
   borrowerPrefix: string;
   adminSignature?: SignatureRef;
+}
+/** Editable origination inputs. These are not released loans or ledger entries. */
+export interface LoanDraft extends RecordMeta {
+  borrowerId: string;
+  advance: boolean;
+  advanceMode: "merge" | "separate";
+  previousLoanId?: string;
+  income: string;
+  affordabilityPercent: string;
+  maximumTerm: string;
+  term: number;
+  rate: string;
+  interestMode: InterestMode;
+  inputMode: "face" | "cash";
+  amount: string;
+  releaseDate: string;
+  releasedBy: string;
+  notes: string;
+  overrideCap: boolean;
+  overrideReason: string;
+  witness: string;
+  signatures: Loan["signatures"];
 }
 export interface Counters extends RecordMeta {
   borrower: number;

@@ -14,7 +14,11 @@ import {
   previewImport,
   restoreSnapshot,
 } from "./index";
-import { parseBackup } from "./format";
+import { encodeValue, parseBackup, sealBackup } from "./format";
+import type { BackupFile } from "./format";
+
+const reseal = async (backup: BackupFile) =>
+  parseBackup(JSON.stringify(sealBackup(await encodeValue(backup))));
 
 beforeEach(async () => {
   await db.transaction("rw", db.tables, async () => {
@@ -74,6 +78,18 @@ describe("safe local database restore", () => {
   });
   it("exports and restores the complete ledger and images into a fresh database", async () => {
     const { borrower, loan } = await sampleLedger();
+    await db.loans.update(loan.id, {
+      documents: [
+        {
+          id: "agreement-scan",
+          name: "Signed agreement.pdf",
+          file: new Blob(["%PDF-1.7 portable scan"], {
+            type: "application/pdf",
+          }),
+          addedAt: "2026-11-05T00:00:00.000Z",
+        },
+      ],
+    });
     const json = await exportBackup();
     const preview = await previewImport(json);
     expect(preview.counts.borrowers).toBe(1);
@@ -91,6 +107,9 @@ describe("safe local database restore", () => {
       "photo",
     );
     expect(await db.transactions.count()).toBe(2);
+    expect(
+      await (await db.loans.get(loan.id))?.documents?.[0].file.text(),
+    ).toBe("%PDF-1.7 portable scan");
     expect(await db.snapshots.count()).toBe(1);
   });
 
@@ -118,7 +137,7 @@ describe("safe local database restore", () => {
     lite.tables.borrowers[0].address = "Updated address";
     lite.tables.borrowers[0].updatedAt = "2099-01-01T00:00:00.000Z";
     lite.tables.loans[0].updatedAt = "2099-01-01T00:00:00.000Z";
-    await importBackup(lite, "merge");
+    await importBackup(await reseal(lite), "merge");
     expect(await (await db.borrowers.get(borrower.id))?.photo?.text()).toBe(
       "photo",
     );
@@ -130,11 +149,32 @@ describe("safe local database restore", () => {
     expect((await db.borrowers.get(borrower.id))?.address).toBe(
       "Updated address",
     );
-    await importBackup(lite, "replace");
+    await importBackup(await reseal(lite), "replace");
     expect((await db.borrowers.get(borrower.id))?.photo).toBeUndefined();
     expect(
       (await db.loans.get(loan.id))?.signatures.borrower?.processed,
     ).toBeUndefined();
+  });
+
+  it("matches portable evidence by immutable document ID when Lite records are reordered", async () => {
+    const { loan } = await sampleLedger();
+    await db.loans.update(loan.id, {
+      documents: ["a", "b"].map((id) => ({
+        id,
+        name: `${id}.pdf`,
+        file: new Blob([id], { type: "application/pdf" }),
+        addedAt: "2026-11-05T00:00:00.000Z",
+      })),
+    });
+    const lite = parseBackup(await exportBackup(true));
+    const incoming = lite.tables.loans[0];
+    incoming.documents = (incoming.documents as unknown[]).reverse();
+    incoming.updatedAt = "2099-01-01T00:00:00.000Z";
+    await importBackup(await reseal(lite), "merge");
+    const documents = (await db.loans.get(loan.id))?.documents;
+    expect(documents?.[0].id).toBe("b");
+    expect(await documents?.[0].file.text()).toBe("b");
+    expect(await documents?.[1].file.text()).toBe("a");
   });
 
   it("saves a pre-import recovery snapshot and retains only the latest five", async () => {
@@ -146,7 +186,7 @@ describe("safe local database restore", () => {
     const backup = parseBackup(before);
     backup.tables.borrowers[0].fullName = "Changed name";
     backup.tables.borrowers[0].updatedAt = "2099-01-01T00:00:00.000Z";
-    await importBackup(backup, "merge");
+    await importBackup(await reseal(backup), "merge");
     expect((await db.borrowers.toArray())[0].fullName).toBe("Changed name");
     const snapshot = (await db.snapshots.toArray()).find(
       (row) => row.reason === "Before merge import",
@@ -171,7 +211,7 @@ describe("safe local database restore", () => {
       transaction.loanId = "incoming-loan";
     }
     backup.tables.auditLogs = [];
-    const summary = await importBackup(backup, "merge");
+    const summary = await importBackup(await reseal(backup), "merge");
     expect(summary.conflicts).toHaveLength(3);
     expect(await db.borrowers.count()).toBe(2);
     expect(await db.loans.count()).toBe(2);

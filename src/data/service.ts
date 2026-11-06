@@ -45,14 +45,29 @@ async function borrower(id: string) {
   return b;
 }
 function snapshot(b: Borrower) {
-  return { numericId: b.numericId, fullName: b.fullName };
+  return {
+    numericId: b.numericId,
+    fullName: b.fullName,
+    address: b.address,
+    contact: b.contact,
+  };
 }
-async function nextTxn(date: string) {
+async function nextTxn(date: string, kind: "PAY" | "DIS" | "REV" | "ADJ") {
   const c = await db.counters.get("counters");
   if (!c) throw new Error("Counters not initialized.");
-  c.txnByDay[date] = (c.txnByDay[date] ?? 0) + 1;
+  const key = `${kind}-${date.slice(0, 4)}`;
+  const prefix = `OWM-${key}-`;
+  const existing = await db.transactions
+    .where("txnNo")
+    .startsWith(prefix)
+    .toArray();
+  const highest = existing.reduce(
+    (max, row) => Math.max(max, Number(row.txnNo.slice(prefix.length)) || 0),
+    0,
+  );
+  c.txnByDay[key] = Math.max(c.txnByDay[key] ?? 0, highest) + 1;
   await db.counters.put({ ...c, updatedAt: new Date().toISOString() });
-  return transactionNumber(date, c.txnByDay[date]);
+  return transactionNumber(date, c.txnByDay[key], kind);
 }
 async function nextLoan(b: Borrower) {
   const c = await db.counters.get("counters");
@@ -91,14 +106,19 @@ function terms(b: Borrower, s: Settings) {
 }
 export type BorrowerInput = Omit<
   Borrower,
-  "id" | "createdAt" | "updatedAt" | "numericId" | "status"
-> & { status?: Borrower["status"] };
+  | "id"
+  | "createdAt"
+  | "updatedAt"
+  | "numericId"
+  | "status"
+  | "address"
+  | "monthlyIncome"
+> & { status?: Borrower["status"]; address?: string; monthlyIncome?: number };
 function validateBorrower(
   input: Pick<Borrower, "fullName" | "address" | "monthlyIncome"> &
     Partial<Borrower>,
 ) {
   if (!input.fullName.trim()) throw new Error("Full name is required.");
-  if (!input.address.trim()) throw new Error("Address is required.");
   assertCents(input.monthlyIncome, "Monthly income");
   if (
     input.rateOverride !== undefined &&
@@ -123,7 +143,11 @@ function validateBorrower(
     throw new Error("Mercy days must be from 0 to 365.");
 }
 export async function createBorrower(input: BorrowerInput): Promise<Borrower> {
-  validateBorrower(input);
+  validateBorrower({
+    ...input,
+    address: input.address ?? "",
+    monthlyIncome: input.monthlyIncome ?? 0,
+  });
   await initDB();
   return db.transaction("rw", mutationTables(), async () => {
     const c = await db.counters.get("counters");
@@ -134,7 +158,8 @@ export async function createBorrower(input: BorrowerInput): Promise<Borrower> {
       ...input,
       ...metadata(),
       fullName: input.fullName.trim(),
-      address: input.address.trim(),
+      address: input.address?.trim() ?? "",
+      monthlyIncome: input.monthlyIncome ?? 0,
       numericId: c.borrower,
       status: input.status ?? "active",
     };
@@ -164,6 +189,16 @@ export async function updateBorrower(
     };
     validateBorrower(next);
     await db.borrowers.put(next);
+    await audit(
+      patch.status
+        ? patch.status === "archived"
+          ? "ARCHIVE"
+          : "RESTORE"
+        : "UPDATE",
+      "borrower",
+      id,
+      `Borrower #${borrowerNumber(next.numericId)} ${patch.status ?? "details updated"}.`,
+    );
     return next;
   });
 }
@@ -178,6 +213,10 @@ export interface CreateLoanInput {
   interestMode?: "upfront" | "added";
   inputMode?: "face" | "cash";
   overrideCap?: boolean;
+  affordabilityPercent?: number;
+  overrideReason?: string;
+  maxTermOverride?: number;
+  draftId?: string;
   notes?: string;
   signatures?: Loan["signatures"];
 }
@@ -189,8 +228,24 @@ export async function createLoan(
     const b = await borrower(input.borrowerId),
       s = await settings(),
       t = terms(b, s);
-    if (input.term > t.maxTerm)
-      throw new Error(`Maximum term is ${t.maxTerm} months.`);
+    if (b.status !== "active")
+      throw new Error(
+        "Restore the archived borrower before issuing a new loan.",
+      );
+    if (
+      input.draftId &&
+      !s.loanDrafts?.some(
+        (draft) => draft.id === input.draftId && draft.borrowerId === b.id,
+      )
+    )
+      throw new Error(
+        "This draft has already been issued or removed. Reload before continuing.",
+      );
+    const maxTerm = input.maxTermOverride ?? t.maxTerm;
+    if (!Number.isInteger(maxTerm) || maxTerm < 1 || maxTerm > 120)
+      throw new Error("Per-loan maximum term must be from 1 to 120 months.");
+    if (input.term > maxTerm)
+      throw new Error(`Maximum term is ${maxTerm} months.`);
     if (!input.releasedBy.trim())
       throw new Error("Released by name is required.");
     if (input.amount <= 0)
@@ -205,10 +260,19 @@ export async function createLoan(
       interestMode,
       amount: input.amount,
       inputMode: input.inputMode,
+      affordabilityPercent: input.affordabilityPercent,
     });
     if (q.capExceeded && !input.overrideCap)
       throw new Error(
-        "Face amount exceeds the income cap. Use Override cap to proceed.",
+        "Face amount exceeds the affordability guideline (income cap). Review and enter an override reason to proceed.",
+      );
+    if (
+      q.capExceeded &&
+      input.affordabilityPercent !== undefined &&
+      !input.overrideReason?.trim()
+    )
+      throw new Error(
+        "An override reason is required above the affordability guideline.",
       );
     const loan: Loan = {
       ...metadata(),
@@ -216,6 +280,10 @@ export async function createLoan(
       borrowerId: b.id,
       borrowerSnapshot: snapshot(b),
       incomeAtLoan: income,
+      affordabilityPercent: input.affordabilityPercent,
+      overrideReason: input.overrideReason?.trim(),
+      agreementTextSnapshot: s.agreementText,
+      businessSnapshot: structuredClone(s.business),
       termMonths: input.term,
       rate,
       interestMode,
@@ -238,7 +306,7 @@ export async function createLoan(
     };
     const transaction: Transaction = {
       ...metadata(),
-      txnNo: await nextTxn(input.releaseDate),
+      txnNo: await nextTxn(input.releaseDate, "DIS"),
       type: "RELEASE",
       loanId: loan.id,
       borrowerId: b.id,
@@ -254,13 +322,23 @@ export async function createLoan(
     };
     await db.loans.add(loan);
     await db.transactions.add(transaction);
+    if (input.draftId)
+      await db.settings.update("settings", {
+        loanDrafts: s.loanDrafts?.filter((draft) => draft.id !== input.draftId),
+      });
+    await audit(
+      "DISBURSEMENT",
+      "loan",
+      loan.id,
+      `${transaction.txnNo}: ${formatMoney(q.netRelease)} released by ${input.releasedBy.trim()}.`,
+    );
     await rememberSigner(input.releasedBy);
     if (input.overrideCap && q.capExceeded)
       await audit(
         "OVERRIDE_CAP",
         "loan",
         loan.id,
-        `Face ${q.face} exceeds cap ${q.maxFace}.`,
+        `Face ${q.face} exceeds guideline ${q.maxFace}. ${input.overrideReason?.trim() ?? "Legacy cap override"}`,
       );
     return { loan, transaction };
   });
@@ -278,6 +356,10 @@ export async function createAdvance(
     const b = await borrower(input.borrowerId),
       s = await settings(),
       t = terms(b, s);
+    if (b.status !== "active")
+      throw new Error(
+        "Restore the archived borrower before issuing an advance.",
+      );
     const previous = await db.loans.get(input.previousLoanId);
     if (
       !previous ||
@@ -306,12 +388,24 @@ export async function createAdvance(
       throw new Error(
         "Advance date must be on or after payments already recorded on this loan.",
       );
-    if (input.term > t.maxTerm)
-      throw new Error(`Maximum term is ${t.maxTerm} months.`);
+    const maxTerm = input.maxTermOverride ?? t.maxTerm;
+    if (!Number.isInteger(maxTerm) || maxTerm < 1 || maxTerm > 120)
+      throw new Error("Per-loan maximum term must be from 1 to 120 months.");
+    if (input.term > maxTerm)
+      throw new Error(`Maximum term is ${maxTerm} months.`);
     if (!input.releasedBy.trim())
       throw new Error("Released by name is required.");
     if (input.amount <= 0)
       throw new Error("Advance amount must be greater than zero.");
+    if (
+      input.draftId &&
+      !s.loanDrafts?.some(
+        (draft) => draft.id === input.draftId && draft.borrowerId === b.id,
+      )
+    )
+      throw new Error(
+        "This draft has already been issued or removed. Reload before continuing.",
+      );
     const allLoans = await db.loans.where("borrowerId").equals(b.id).toArray();
     const outstanding = allLoans.reduce((sum, l) => sum + balance(l), 0);
     const income = input.income ?? b.monthlyIncome,
@@ -329,12 +423,21 @@ export async function createAdvance(
       mode: input.mode,
       releaseDate: input.releaseDate,
       graceDays: t.graceDays,
+      affordabilityPercent: input.affordabilityPercent,
     });
     if (q.capExceeded && !input.overrideCap)
       throw new Error(
         q.maxAdvance <= 0
           ? "No advance available: the outstanding balance already reaches the income cap."
           : "Advance exceeds the combined exposure cap. Use Override cap to proceed.",
+      );
+    if (
+      q.capExceeded &&
+      input.affordabilityPercent !== undefined &&
+      !input.overrideReason?.trim()
+    )
+      throw new Error(
+        "An override reason is required above the affordability guideline.",
       );
     const loanNo = await nextLoan(b);
     const autoNote = `Advance on ${input.releaseDate} · Balance carried ${formatMoney(q.carriedBalance)} (${previous.loanNo}) + advance ${formatMoney(q.advanceFace)} (interest ${formatMoney(q.interest)}, cash ${formatMoney(q.netCash)}) → ${input.mode === "merge" ? "merged into" : "separate loan"} ${loanNo} · ${formatMoney(q.newFace)} over ${input.term} months, ${formatMoney(q.monthly)}/month, first due ${q.installments[0].dueDate}.`;
@@ -344,6 +447,10 @@ export async function createAdvance(
       borrowerId: b.id,
       borrowerSnapshot: snapshot(b),
       incomeAtLoan: income,
+      affordabilityPercent: input.affordabilityPercent,
+      overrideReason: input.overrideReason?.trim(),
+      agreementTextSnapshot: s.agreementText,
+      businessSnapshot: structuredClone(s.business),
       termMonths: input.term,
       rate,
       interestMode,
@@ -365,7 +472,7 @@ export async function createAdvance(
     };
     const transaction: Transaction = {
       ...metadata(),
-      txnNo: await nextTxn(input.releaseDate),
+      txnNo: await nextTxn(input.releaseDate, "DIS"),
       type: "ADVANCE",
       loanId: loan.id,
       borrowerId: b.id,
@@ -410,6 +517,12 @@ export async function createAdvance(
     }
     await db.loans.add(loan);
     await db.transactions.add(transaction);
+    await audit(
+      "DISBURSEMENT",
+      "loan",
+      loan.id,
+      `${transaction.txnNo}: advance cash ${formatMoney(q.netCash)} released by ${input.releasedBy.trim()}.`,
+    );
     await db.notes.add({
       ...metadata(),
       borrowerId: b.id,
@@ -417,13 +530,17 @@ export async function createAdvance(
       kind: "advance",
       loanId: loan.id,
     });
+    if (input.draftId)
+      await db.settings.update("settings", {
+        loanDrafts: s.loanDrafts?.filter((draft) => draft.id !== input.draftId),
+      });
     await rememberSigner(input.releasedBy);
     if (input.overrideCap && q.capExceeded)
       await audit(
         "OVERRIDE_CAP",
         "loan",
         loan.id,
-        `Exposure ${(input.mode === "merge" ? q.carriedBalance : outstanding) + q.advanceFace} exceeds cap ${q.maxFace}.`,
+        `Exposure ${(input.mode === "merge" ? q.carriedBalance : outstanding) + q.advanceFace} exceeds guideline ${q.maxFace}. ${input.overrideReason?.trim() ?? "Legacy cap override"}`,
       );
     return { loan, transaction, previousLoan };
   });
@@ -477,7 +594,7 @@ export async function receivePayment(
     const transaction: Transaction = {
       ...input,
       ...metadata(),
-      txnNo: await nextTxn(input.date),
+      txnNo: await nextTxn(input.date, "PAY"),
       type: "PAYMENT",
       borrowerId: original.borrowerId,
       borrowerSnapshot: original.borrowerSnapshot,
@@ -490,6 +607,12 @@ export async function receivePayment(
     };
     await db.loans.put(loan);
     await db.transactions.add(transaction);
+    await audit(
+      "PAYMENT",
+      "transaction",
+      transaction.id,
+      `${transaction.txnNo}: ${formatMoney(input.amount)} received by ${input.receivedBy.trim()}.`,
+    );
     await rememberSigner(input.receivedBy);
     return { loan, transaction };
   });
@@ -513,8 +636,10 @@ export async function voidTransaction(
     throw new Error("A reason is required to void a transaction.");
   return db.transaction("rw", mutationTables(), async () => {
     const original = await db.transactions.get(id);
-    if (!original || !["PAYMENT", "ADVANCE"].includes(original.type))
-      throw new Error("Only payments and advances can be voided.");
+    if (!original || !["PAYMENT", "ADVANCE", "RELEASE"].includes(original.type))
+      throw new Error(
+        "Only cash releases, payments, and advances can be voided.",
+      );
     if (await db.transactions.where("voidOf").equals(id).first())
       throw new Error("This transaction has already been voided.");
     if (date < original.date)
@@ -532,7 +657,25 @@ export async function voidTransaction(
     );
     const before = balance(loan);
     let after = before;
-    if (original.type === "ADVANCE" && original.advance) {
+    if (original.type === "RELEASE") {
+      if (loanTxns.some((x) => x.type === "PAYMENT" && !voided.has(x.id)))
+        throw new Error(
+          "Void all payments on this loan before correcting its cash release.",
+        );
+      const linked = (await db.loans.toArray()).filter(
+        (l) => l.parentLoanId === loan.id,
+      );
+      if (loan.status === "merged" || linked.some((l) => l.status !== "voided"))
+        throw new Error(
+          "Void all linked advances before correcting this cash release.",
+        );
+      after = 0;
+      await db.loans.put({
+        ...loan,
+        status: "voided",
+        updatedAt: new Date().toISOString(),
+      });
+    } else if (original.type === "ADVANCE" && original.advance) {
       if (loanTxns.some((x) => x.type === "PAYMENT" && !voided.has(x.id)))
         throw new Error("Void payments on this advance loan first.");
       if (loan.status === "merged")
@@ -574,12 +717,19 @@ export async function voidTransaction(
             a.createdAt.localeCompare(b.createdAt) ||
             a.txnNo.localeCompare(b.txnNo),
         );
-      for (const p of payments)
-        installments = allocatePayment(
-          installments,
-          p.amount,
-          p.date,
-        ).installments;
+      for (const p of payments) {
+        // A correction must not silently spend credit retained on an immutable receipt.
+        const applied = p.allocation.reduce(
+          (sum, item) => sum + item.amount,
+          0,
+        );
+        if (applied > 0)
+          installments = allocatePayment(
+            installments,
+            applied,
+            p.date,
+          ).installments;
+      }
       after = balance({ installments });
       await db.loans.put({
         ...loan,
@@ -590,7 +740,7 @@ export async function voidTransaction(
     }
     const reversal: Transaction = {
       ...metadata(),
-      txnNo: await nextTxn(date),
+      txnNo: await nextTxn(date, "REV"),
       type: "VOID",
       loanId: loan.id,
       borrowerId: original.borrowerId,
@@ -610,8 +760,94 @@ export async function voidTransaction(
     return reversal;
   });
 }
-export async function archiveBorrower(id: string) {
+export async function archiveBorrower(id: string, confirmation: string) {
+  const b = await borrower(id);
+  if (!canDeleteBorrower(b.fullName, confirmation))
+    throw new Error(
+      "Type the exact confirmation phrase, including capitalization.",
+    );
   return updateBorrower(id, { status: "archived" });
+}
+/** Separate privacy action, performed only after the owner reviews retention duties. */
+export async function anonymizeBorrower(
+  id: string,
+  confirmation: string,
+  retentionReviewed: boolean,
+) {
+  return db.transaction("rw", [...mutationTables(), db.snapshots], async () => {
+    const b = await borrower(id);
+    if (!retentionReviewed || !canDeleteBorrower(b.fullName, confirmation))
+      throw new Error(
+        "Review retention obligations and enter the exact confirmation before anonymizing.",
+      );
+    const anonymous = {
+      numericId: b.numericId,
+      fullName: `Anonymized borrower ${borrowerNumber(b.numericId)}`,
+    };
+    const loans = await db.loans.where("borrowerId").equals(id).toArray();
+    const transactions = await db.transactions
+      .where("borrowerId")
+      .equals(id)
+      .toArray();
+    const relatedIds = new Set([
+      id,
+      ...loans.map((loan) => loan.id),
+      ...transactions.map((txn) => txn.id),
+    ]);
+    await db.loans
+      .where("borrowerId")
+      .equals(id)
+      .modify((loan) => {
+        loan.borrowerSnapshot = anonymous;
+        loan.notes = undefined;
+        loan.autoNote = undefined;
+        loan.signatures = {};
+        loan.signatureHistory = [];
+        loan.documents = [];
+        loan.updatedAt = new Date().toISOString();
+      });
+    await db.transactions
+      .where("borrowerId")
+      .equals(id)
+      .modify((txn) => {
+        txn.borrowerSnapshot = anonymous;
+        txn.notes = undefined;
+        txn.proofImage = undefined;
+        txn.signatures = undefined;
+        txn.referenceNo = undefined;
+        txn.updatedAt = new Date().toISOString();
+      });
+    await db.auditLogs
+      .filter((entry) => relatedIds.has(entry.entityId))
+      .modify((entry) => {
+        entry.detail = `Historic borrower activity for #${borrowerNumber(b.numericId)} (personal text anonymized).`;
+      });
+    // Recovery snapshots contain the prior profile and scans. Clear them so
+    // this local privacy action cannot silently resurrect personal details.
+    await db.snapshots.clear();
+    await db.borrowers.delete(id);
+    await db.notes.where("borrowerId").equals(id).delete();
+    const settings = await db.settings.get("settings");
+    if (settings?.loanDrafts)
+      await db.settings.update("settings", {
+        loanDrafts: settings.loanDrafts.filter(
+          (draft) => draft.borrowerId !== id,
+        ),
+        updatedAt: new Date().toISOString(),
+      });
+    await db.tombstones.add({
+      ...metadata(),
+      entity: "borrowers",
+      entityId: id,
+      deletedAt: new Date().toISOString(),
+    });
+    await audit(
+      "PRIVACY_ANONYMIZE",
+      "borrower",
+      id,
+      `Borrower #${borrowerNumber(b.numericId)} anonymized after owner retention review; financial amounts retained.`,
+    );
+  });
 }
 export async function deleteBorrower(id: string, confirmation: string) {
   return db.transaction("rw", mutationTables(), async () => {
@@ -645,6 +881,14 @@ export async function addNote(borrowerId: string, text: string) {
     kind: "manual" as const,
   };
   await db.notes.add(note);
+  await db.auditLogs.add({
+    ...metadata(),
+    at: new Date().toISOString(),
+    action: "NOTE_ADDED",
+    entity: "borrower",
+    entityId: borrowerId,
+    detail: "Owner note added.",
+  });
   return note;
 }
 export async function attachLoanSignature(
@@ -652,11 +896,67 @@ export async function attachLoanSignature(
   role: keyof Loan["signatures"],
   signature: SignatureRef | undefined,
 ) {
-  const loan = await db.loans.get(loanId);
-  if (!loan) throw new Error("Loan not found.");
-  await db.loans.put({
-    ...loan,
-    signatures: { ...loan.signatures, [role]: signature },
-    updatedAt: new Date().toISOString(),
+  await db.transaction("rw", [db.loans, db.auditLogs], async () => {
+    const loan = await db.loans.get(loanId);
+    if (!loan) throw new Error("Loan not found.");
+    await db.loans.put({
+      ...loan,
+      signatures: { ...loan.signatures, [role]: signature },
+      signatureHistory: loan.signatures[role]
+        ? [
+            ...(loan.signatureHistory ?? []),
+            {
+              role,
+              signature: loan.signatures[role]!,
+              replacedAt: new Date().toISOString(),
+            },
+          ]
+        : loan.signatureHistory,
+      updatedAt: new Date().toISOString(),
+    });
+    await audit(
+      "DOCUMENT_ATTACHED",
+      "loan",
+      loanId,
+      `${role} signature ${signature ? "attached" : "removed"}; existing agreement amounts and due dates preserved.`,
+    );
+  });
+}
+export async function attachLoanDocument(
+  loanId: string,
+  file: Blob,
+  name: string,
+) {
+  if (
+    !["image/jpeg", "image/png", "image/webp", "application/pdf"].includes(
+      file.type,
+    )
+  )
+    throw new Error("Use a JPEG, PNG, WebP image, or PDF document.");
+  if (file.size > 20 * 1024 * 1024)
+    throw new Error(
+      "Document must be 20 MB or smaller. Compress it before attaching.",
+    );
+  return db.transaction("rw", [db.loans, db.auditLogs], async () => {
+    const loan = await db.loans.get(loanId);
+    if (!loan) throw new Error("Loan not found.");
+    const document = {
+      id: crypto.randomUUID(),
+      name: name.trim() || "Signed agreement",
+      file,
+      addedAt: new Date().toISOString(),
+    };
+    await db.loans.put({
+      ...loan,
+      documents: [...(loan.documents ?? []), document],
+      updatedAt: document.addedAt,
+    });
+    await audit(
+      "DOCUMENT_ATTACHED",
+      "loan",
+      loan.id,
+      `Document ${document.name} attached to ${loan.loanNo}; document ID ${document.id}.`,
+    );
+    return document;
   });
 }

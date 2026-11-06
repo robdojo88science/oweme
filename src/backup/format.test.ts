@@ -5,6 +5,7 @@ import {
   encodeValue,
   mergeBackupData,
   parseBackup,
+  sealBackup,
 } from "./format";
 import type { BackupData, BackupFile, BackupRecord } from "./format";
 
@@ -56,6 +57,22 @@ const envelope = (tables = emptyBackupData()): BackupFile => ({
 });
 
 describe("versioned backups", () => {
+  it("verifies portable record counts and detects altered backup contents", async () => {
+    const tables = emptyBackupData();
+    tables.borrowers = [borrower("b1", 1)];
+    const encoded = sealBackup(await encodeValue(envelope(tables)));
+    const json = JSON.stringify(encoded);
+    expect(parseBackup(json).counts?.borrowers).toBe(1);
+    expect(parseBackup(json).checksum?.algorithm).toBe("CRC32");
+    const altered = JSON.parse(json);
+    altered.tables.borrowers[0].fullName = "A changed name";
+    expect(() => parseBackup(JSON.stringify(altered))).toThrow(
+      "checksum mismatch",
+    );
+    delete altered.checksum;
+    altered.counts.borrowers = 2;
+    expect(() => parseBackup(JSON.stringify(altered))).toThrow("record count");
+  });
   it("round-trips nested images and signatures, including empty blobs", async () => {
     const tables = emptyBackupData();
     tables.borrowers = [

@@ -10,7 +10,7 @@ import {
 import type { Borrower } from "../core/model";
 import { canClearAll, canDeleteBorrower } from "../core/logic";
 import { db, initDB } from "../data/db";
-import { deleteBorrower, updateBorrower } from "../data/service";
+import { anonymizeBorrower, archiveBorrower } from "../data/service";
 import { createSnapshot, importBackup, saveLocalBackup } from "../backup";
 import type { ImportPreview, ImportSummary } from "../backup";
 import {
@@ -20,7 +20,7 @@ import {
   syncDrive,
 } from "../backup/google";
 import type { DriveSyncResult } from "../backup/google";
-import { ErrorBox, Modal } from "./primitives";
+import { ErrorBox, Modal, Money } from "./primitives";
 import { haptic } from "./store";
 
 type CommonProps = { onClose(): void; onToast(message: string): void };
@@ -38,6 +38,9 @@ export function DeleteBorrowerDialog({
   const [confirmation, setConfirmation] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
+  const [secondConfirm, setSecondConfirm] = useState(false);
+  const [privacy, setPrivacy] = useState(false);
+  const [retentionReviewed, setRetentionReviewed] = useState(false);
   useEffect(() => {
     void db.settings
       .get("settings")
@@ -45,13 +48,13 @@ export function DeleteBorrowerDialog({
   }, []);
   const allowed = canDeleteBorrower(borrower.fullName, confirmation);
   const remove = async () => {
-    if (!allowed || busy) return;
+    if (!allowed || !secondConfirm || !retentionReviewed || busy) return;
     setBusy(true);
     setError("");
     try {
-      await deleteBorrower(borrower.id, confirmation);
+      await anonymizeBorrower(borrower.id, confirmation, retentionReviewed);
       onToast(
-        "Borrower account deleted. Loans and transactions remain in History.",
+        "Borrower personal details anonymized. Financial amounts remain in history.",
       );
       await onDeleted();
       onClose();
@@ -61,11 +64,11 @@ export function DeleteBorrowerDialog({
     }
   };
   const archive = async () => {
-    if (busy) return;
+    if (!allowed || !secondConfirm || busy) return;
     setBusy(true);
     setError("");
     try {
-      await updateBorrower(borrower.id, { status: "archived" });
+      await archiveBorrower(borrower.id, confirmation);
       onToast(
         "Borrower archived. You can find the account with the Archived filter.",
       );
@@ -81,29 +84,45 @@ export function DeleteBorrowerDialog({
   }, [busy, onClose]);
   return (
     <Modal
-      title="Delete borrower account"
-      subtitle="Permanent account removal"
+      title={privacy ? "Privacy erasure review" : "Archive borrower"}
+      subtitle={
+        privacy
+          ? "Separate action after reviewing retention obligations"
+          : "Keep every loan, receipt, and document"
+      }
       onClose={close}
     >
       <div className="modal-body">
-        <div className="alert error">
-          <strong>{borrower.fullName}</strong>'s account, profile photo, and
-          private notes will be removed. Every loan, receipt, and transaction
-          stays in permanent History with the borrower's saved name and ID. The
-          ID will never be reused.
+        <div className={`alert ${privacy ? "error" : ""}`}>
+          {privacy ? (
+            <>
+              Review applicable retention and legal obligations before
+              proceeding. This removes the profile, contact details, notes,
+              signatures, and proof images, and anonymizes loan and receipt
+              names. Financial amounts and numbering remain. Local recovery
+              snapshots are removed. Existing downloaded or cloud backups and
+              documents must be reviewed separately.
+            </>
+          ) : (
+            <>
+              <Archive size={16} aria-hidden="true" />{" "}
+              <strong>{borrower.fullName}</strong> will leave the active
+              directory. All history stays available, and you can restore the
+              account from the Archived filter.
+            </>
+          )}
         </div>
-        <div className="alert">
-          <Archive size={16} aria-hidden="true" /> Archive keeps the full
-          account and moves it out of your active list.
-        </div>
-        <button
-          className="button"
-          disabled={busy}
-          onClick={() => void archive()}
-        >
-          <Archive size={16} />
-          Archive account instead
-        </button>
+        {privacy && (
+          <label className="checkbox-row" style={{ marginTop: 18 }}>
+            <input
+              type="checkbox"
+              checked={retentionReviewed}
+              onChange={(e) => setRetentionReviewed(e.target.checked)}
+            />
+            I have reviewed retention obligations and confirmed that
+            anonymization is appropriate.
+          </label>
+        )}
         <label className="field" style={{ marginTop: 24 }}>
           <span>
             Type <strong>Delete {borrower.fullName}</strong> exactly
@@ -112,10 +131,24 @@ export function DeleteBorrowerDialog({
             autoComplete="off"
             spellCheck={false}
             value={confirmation}
-            onChange={(event) => setConfirmation(event.target.value)}
+            onChange={(event) => {
+              setConfirmation(event.target.value);
+              setSecondConfirm(false);
+            }}
             disabled={busy}
             aria-label="Delete confirmation"
           />
+        </label>
+        <label className="checkbox-row" style={{ marginTop: 16 }}>
+          <input
+            type="checkbox"
+            checked={secondConfirm}
+            disabled={!allowed || busy}
+            onChange={(e) => setSecondConfirm(e.target.checked)}
+          />
+          {privacy
+            ? "I confirm this personal-data erasure cannot be undone in this notebook."
+            : "I confirm I want to archive this borrower and preserve their history."}
         </label>
         <ErrorBox error={error} />
         <div className="form-actions">
@@ -124,17 +157,37 @@ export function DeleteBorrowerDialog({
           </button>
           <button
             className="button danger"
-            disabled={!allowed || busy}
-            onClick={() => void remove()}
+            disabled={
+              !allowed ||
+              !secondConfirm ||
+              (privacy && !retentionReviewed) ||
+              busy
+            }
+            onClick={() => void (privacy ? remove() : archive())}
           >
             {busy ? (
               <LoaderCircle size={16} className="spin" />
-            ) : (
+            ) : privacy ? (
               <Trash2 size={16} />
+            ) : (
+              <Archive size={16} />
             )}
-            Delete account
+            {privacy ? "Anonymize personal data" : "Archive borrower"}
           </button>
         </div>
+        <button
+          type="button"
+          className="text-button"
+          style={{ marginTop: 20 }}
+          disabled={busy}
+          onClick={() => {
+            setPrivacy(!privacy);
+            setSecondConfirm(false);
+            setConfirmation("");
+          }}
+        >
+          {privacy ? "Back to archive" : "Review a privacy erasure request"}
+        </button>
       </div>
     </Modal>
   );
@@ -150,7 +203,6 @@ export function ClearDataDialog({
     loans: 0,
     transactions: 0,
   });
-  const [backupAttempted, setBackupAttempted] = useState(false);
   const [backupComplete, setBackupComplete] = useState(false);
   const [savedCopy, setSavedCopy] = useState(false);
   const [confirmation, setConfirmation] = useState("");
@@ -165,7 +217,10 @@ export function ClearDataDialog({
   );
   const busyRef = useRef(false);
   const ready =
-    backupAttempted && savedCopy && confirmation === "DELETE ALL DATA" && !busy;
+    backupComplete &&
+    savedCopy &&
+    confirmation === "CLEAR ALL OWEME DATA" &&
+    !busy;
   const readyRef = useRef(ready);
   readyRef.current = ready;
   const confirmationRef = useRef(confirmation);
@@ -209,7 +264,6 @@ export function ClearDataDialog({
     setError("");
     setBackupMessage("");
     setSavedCopy(false);
-    setBackupAttempted(true);
     setBackupComplete(false);
     try {
       await saveLocalBackup();
@@ -252,7 +306,7 @@ export function ClearDataDialog({
     } catch (cause) {
       setError(errorText(cause));
       setBackupMessage(
-        "A local backup was attempted. You may continue only if you already have a full saved copy outside this browser.",
+        "The new backup failed. Clearing is blocked. Save a new full backup successfully before continuing.",
       );
     } finally {
       setBusy(false);
@@ -265,7 +319,7 @@ export function ClearDataDialog({
       busyRef.current ||
       !canClearAll(
         confirmationRef.current,
-        copyRef.current && backupAttempted,
+        copyRef.current && backupComplete,
         actualHoldMs,
       )
     ) {
@@ -285,7 +339,7 @@ export function ClearDataDialog({
         if (
           !canClearAll(
             confirmationRef.current,
-            copyRef.current && backupAttempted,
+            copyRef.current && backupComplete,
             actualHoldMs,
           )
         )
@@ -365,7 +419,7 @@ export function ClearDataDialog({
         <label className="checkbox-row" style={{ marginTop: 18 }}>
           <input
             type="checkbox"
-            disabled={!backupAttempted || busy}
+            disabled={!backupComplete || busy}
             checked={savedCopy}
             onChange={(event) => {
               cancelHold();
@@ -376,7 +430,7 @@ export function ClearDataDialog({
         </label>
         <label className="field" style={{ marginTop: 20 }}>
           <span>
-            Type <strong>DELETE ALL DATA</strong> exactly
+            Type <strong>CLEAR ALL OWEME DATA</strong> exactly
           </span>
           <input
             value={confirmation}
@@ -469,7 +523,7 @@ export function ImportPreviewDialog({
       const summary =
         source && mode === "merge"
           ? await mergeDriveBackup(source)
-          : await importBackup(preview.backup, mode);
+          : await importBackup(preview.backup, mode, preview.accounting?.local);
       // A reviewed Drive replacement also acknowledges the exact remote version.
       if (source && mode === "replace") {
         const settings = await db.settings.get("settings");
@@ -569,12 +623,64 @@ export function ImportPreviewDialog({
           </div>
         )}
         <div className="alert">
-          A local recovery snapshot is saved first. <strong>Merge</strong>{" "}
-          combines both datasets using the newest version of each record.{" "}
+          A local recovery snapshot is saved first. <strong>Safe Merge</strong>{" "}
+          combines compatible histories. Financial UUIDs cannot be overwritten,
+          and divergent same-loan activity is blocked for review.{" "}
           <strong>Replace</strong> restores the incoming dataset and removes
           current records absent from it. Previously used numbering stays
           reserved.
         </div>
+        {preview.accounting && (
+          <>
+            <h3 className="form-section-title">Compare accounting totals</h3>
+            <table className="schedule">
+              <thead>
+                <tr>
+                  <th>Metric</th>
+                  <th>Current</th>
+                  <th>Replace</th>
+                  <th>Safe merge</th>
+                </tr>
+              </thead>
+              <tbody>
+                {(
+                  [
+                    ["Outstanding", "outstanding"],
+                    ["Cash released", "released"],
+                    ["Cash collected", "collected"],
+                  ] as const
+                ).map(([label, key]) => (
+                  <tr key={key}>
+                    <td>{label}</td>
+                    <td>
+                      <Money amount={preview.accounting!.local[key]} />
+                    </td>
+                    <td>
+                      <Money amount={preview.accounting!.incoming[key]} />
+                    </td>
+                    <td>
+                      {preview.accounting!.merged ? (
+                        <Money amount={preview.accounting!.merged[key]} />
+                      ) : (
+                        "Blocked"
+                      )}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+            <p className="caption" style={{ marginTop: 10 }}>
+              Cash totals exclude reversed original entries. Outstanding is the
+              current repayment obligation. Replace uses the incoming file as
+              the complete authoritative notebook.
+            </p>
+          </>
+        )}
+        {preview.mergeBlocked && (
+          <div className="alert error" role="alert">
+            {preview.mergeBlocked}
+          </div>
+        )}
         {preview.lite && (
           <div className="alert amber">
             This backup excludes photos and signatures. Merge keeps existing
@@ -596,7 +702,7 @@ export function ImportPreviewDialog({
           </button>
           <button
             className="button primary"
-            disabled={busy}
+            disabled={busy || Boolean(preview.mergeBlocked)}
             onClick={() => void runImport("merge")}
           >
             {busy ? (

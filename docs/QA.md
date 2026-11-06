@@ -1,5 +1,17 @@
 # Validation record
 
+## UI and ledger revision — 2026-11-06
+
+Local checks for this revision passed: ESLint, strict TypeScript, 141 Vitest tests, 14 Chrome/Playwright workflows, and the production build. Responsive tests cover 1440px desktop, 834px tablet, and 390px phone layouts across the main routes. Home and More screenshots were visually reviewed. Test records use isolated browser contexts and are not included as demo data.
+
+The rebuilt production service worker activated under `/oweme/`. A fresh test context passed offline reload, calculator, borrower search, an offline payment, embedded-font receipt PDF download, and balance persistence after reload, with no page errors. Its final test balance was ₱2,500.00 and the generated PDF was 74,413 bytes. Reproduce with `node scripts/offline-smoke.mjs` against the production preview.
+
+Regression tests cover contractual-date ratings, the affordability guideline, atomic signature/payment writes, stale-draft issuance, retained credit after payment reversal, release correction, chained merged-charge recognition, portable image/PDF backups, accounting previews, divergent-ledger merge rejection, and incomplete-restore rollback. PDF agreement/receipt/statement/report layouts were rendered and inspected; an empty report sample is provided under `output/pdf/`.
+
+Drive/Gmail behavior is tested with API mocks. Real-account delivery and physical iPhone/iPad/Android installation, camera, haptics and sharing remain unverified. The older deployment measurements below are historical and do not certify this revision's live deployment.
+
+## Earlier verification
+
 Checks use disposable test data and separate browser contexts. No borrower records from a personal browser are committed or uploaded.
 
 On 2026-11-05, the production build passed the following local checks:

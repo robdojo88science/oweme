@@ -18,11 +18,12 @@ OweMe works without Google. Local JSON export/import needs no account or network
 
 Google may display an unverified-app notice during personal testing. Only continue if this is the Cloud project and client ID you configured. Publishing to other users can require Google's OAuth verification; follow the console's current requirements for the scopes you select. A personal testing project may require consent again as testing sessions and access tokens expire. Workspace administrators can also restrict consent.
 
-## How backups and multi-device sync behave
+## How backups and multi-device recovery behave
 
 - The first successful backup creates `OweMe-backup.json`. OweMe remembers its file ID and updates that same file using `PATCH`. A fresh device searches accessible Drive files for this name before creating anything. If the linked file is missing, inaccessible, or in Trash, OweMe reports the problem instead of creating a replacement silently.
 - On another device, configure the same client ID and Google account, then connect. A newer Drive file produces an import preview. Review the counts and conflicts and choose **Merge backup**. Same record IDs use the newest `updatedAt`. Deletion markers prevent deleted borrower accounts from returning. Different borrowers that collide on numeric ID are kept and renumbered; duplicate transaction numbers get a `-B` suffix.
 - Automatic means **while the app is open**, on changes, on focus, or when the connection returns. It cannot guarantee jobs while a phone browser or installed web app is closed. Access tokens stay in memory and expire; tap **Connect Google** again when asked. The browser may block or suspend background activity.
+- The account label is read from Drive’s authenticated `about.get` response using the same `drive.file` permission; it is not guessed from your backup email setting. A confirmed upload time appears only after Drive returns the expected file ID and revision. Pending edits remain queued after offline failures, expiry, or a revision conflict.
 - Email is sent **from the Google account you authorize**, using Gmail's API. The backup is a JSON attachment. Files above 20 MB switch to Lite backups without images; keep full images in your local or Drive backup. If even Lite exceeds 20 MB, use local export or Drive instead.
 - Daily email scheduling uses the date in **Asia/Manila** and is checked when the app is open. A failed backup leaves the local dataset intact and records an error in Settings.
 - The most recent five automatic pre-import/pre-restore/pre-clear snapshots remain in IndexedDB. They are intentionally excluded from exported backups so backup files cannot recursively grow. Download your own independent backup regularly; local snapshots can be evicted with browser data.
@@ -31,6 +32,8 @@ Google may display an unverified-app notice during personal testing. Only contin
 ## Local backup and restore
 
 Choose **Full backup** for a complete JSON, or **Lite** for text without photos and signatures. Supported desktop browsers can save repeatedly to a selected file; phones use the system share sheet where available, with download as the fallback. Keep the file private: it includes borrower contact information and financial records.
+
+Full backups include PDF agreement scans as well as images. New files carry record counts and a CRC32 integrity checksum; damaged counts/content are rejected before import. CRC32 detects accidental corruption, not tampering by an attacker, and does not encrypt personal records. Older schema-version-1 files remain accepted as legacy backups. Download initiation cannot confirm that the browser retained a file; check the downloaded copy before relying on it.
 
 To restore, use **Import a backup** to select the JSON file, inspect the preview, then choose **Merge backup** or **Replace**. Validation runs before writing. Lite Merge retains existing local photos and signature images when the record and signature capture match; it never attaches an old signature to a new signer or capture. Replace restores the incoming dataset, so Lite Replace removes local images. Numeric counters retain the highest already-used values to avoid ID reuse. A local recovery snapshot is saved before either import mode. Intentionally clearing all data also erases those local snapshots, so the separately saved JSON file is the recovery copy after a clear.
 
@@ -41,4 +44,5 @@ To restore, use **Import a backup** to select the JSON file, inspect the preview
 - [Client-side OAuth origins and validation rules](https://developers.google.com/identity/protocols/oauth2/javascript-implicit-flow)
 - [Drive uploads and updates](https://developers.google.com/workspace/drive/api/guides/manage-uploads)
 - [Drive files.update API](https://developers.google.com/workspace/drive/api/reference/rest/v3/files/update)
+- [Drive account information and fields](https://developers.google.com/workspace/drive/api/guides/user-info)
 - [Gmail messages and attachments](https://developers.google.com/workspace/gmail/api/guides/sending)

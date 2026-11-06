@@ -1,18 +1,17 @@
-import { useMemo, useState } from "react";
+﻿import { useMemo, useState } from "react";
 import {
   ArrowDownLeft,
   ArrowRight,
   ArrowUpRight,
-  Banknote,
   CalendarDays,
-  ChevronDown,
+  Check,
   CircleCheck,
   Clock3,
+  FileSignature,
   Inbox,
-  Landmark,
   Plus,
+  Search,
   ShieldCheck,
-  Sparkles,
   TrendingUp,
   Users,
   Wallet,
@@ -21,7 +20,6 @@ import { useNavigate } from "react-router-dom";
 import {
   addDays,
   addMonthsClamped,
-  balance,
   borrowerNumber,
   formatMoney,
   installmentStatus,
@@ -31,6 +29,8 @@ import type { Borrower, Installment, Loan } from "../core/model";
 import type { AppData, Actions } from "./types";
 import { Avatar, Empty, Help, Money, SectionTitle } from "./primitives";
 import { Status } from "./forms";
+import { liveTransactions, summarize } from "./dashboard";
+
 export interface DueRow {
   borrower: Borrower;
   loan: Loan;
@@ -39,8 +39,8 @@ export interface DueRow {
   deletedAccount?: boolean;
 }
 export function dueRows(data: AppData) {
-  const asOf = today();
-  const bmap = new Map(data.borrowers.map((b) => [b.id, b]));
+  const date = today(),
+    bmap = new Map(data.borrowers.map((b) => [b.id, b]));
   return data.loans
     .filter((l) => l.status === "active")
     .flatMap((loan) =>
@@ -49,14 +49,14 @@ export function dueRows(data: AppData) {
         .map((item) => ({
           loan,
           item,
-          status: installmentStatus(item, asOf),
+          status: installmentStatus(item, date),
           deletedAccount: !bmap.has(loan.borrowerId),
           borrower:
             bmap.get(loan.borrowerId) ||
             ({
               ...loan.borrowerSnapshot,
               id: loan.borrowerId,
-              address: "Deleted account",
+              address: "Anonymized account",
               monthlyIncome: 0,
               status: "archived",
               createdAt: loan.createdAt,
@@ -83,11 +83,7 @@ export function ReminderRow({
         onClick={() =>
           nav(row.deletedAccount ? "/history" : `/borrowers/${row.borrower.id}`)
         }
-        title={
-          row.deletedAccount
-            ? "Open permanent history for this deleted account"
-            : "Open borrower account"
-        }
+        title="Open borrower account"
       >
         <Avatar borrower={row.borrower} />
         <div>
@@ -95,7 +91,6 @@ export function ReminderRow({
           <p>
             #{borrowerNumber(row.borrower.numericId, prefix)} ·{" "}
             {row.item.dueDate}
-            {row.deletedAccount && " · Deleted account"}
           </p>
         </div>
       </button>
@@ -112,6 +107,7 @@ export function ReminderRow({
     </div>
   );
 }
+
 export function HomePage({
   data,
   actions,
@@ -120,49 +116,32 @@ export function HomePage({
   actions: Actions;
 }) {
   const nav = useNavigate(),
-    [tab, setTab] = useState("Due today");
+    [tab, setTab] = useState("Due today"),
+    [range, setRange] = useState("This month");
   const date = today(),
-    month = date.slice(0, 7);
-  const voided = new Set(
-    data.transactions.filter((t) => t.type === "VOID").map((t) => t.voidOf),
-  );
-  const valid = data.transactions.filter(
-    (t) => t.type !== "VOID" && !voided.has(t.id),
-  );
-  const outstanding = data.loans.reduce((s, l) => s + balance(l), 0),
-    collected = valid
-      .filter((t) => t.type === "PAYMENT" && t.date.startsWith(month))
-      .reduce((s, t) => s + t.amount, 0),
-    released = valid
-      .filter(
-        (t) =>
-          ["RELEASE", "ADVANCE"].includes(t.type) && t.date.startsWith(month),
-      )
-      .reduce((s, t) => s + t.amount, 0);
-  const lmap = new Map(data.loans.map((l) => [l.id, l]));
-  const interest = valid
-      .filter(
-        (t) =>
-          ["RELEASE", "ADVANCE"].includes(t.type) && t.date.startsWith(month),
-      )
-      .reduce(
-        (s, t) =>
-          s + (t.advance?.interest ?? lmap.get(t.loanId)?.interestAmount ?? 0),
-        0,
-      ),
-    active = data.loans.filter((l) => l.status === "active").length;
+    start =
+      range === "This month"
+        ? `${date.slice(0, 7)}-01`
+        : range === "Last 30 days"
+          ? addDays(date, -29)
+          : "0000-01-01";
+  const metrics = summarize(data, start, date, date);
   const rows = useMemo(() => dueRows(data), [data]);
-  const tabs = ["Due today", "Next 7 days", "Mercy", "Overdue"];
-  const groups = tabs.map((t) =>
-    rows.filter((r) =>
-      t === "Due today"
-        ? r.item.dueDate === date
-        : t === "Next 7 days"
-          ? r.item.dueDate > date && r.item.dueDate <= addDays(date, 7)
-          : r.status === t,
+  const tabs = ["Due today", "Next 7 days", "Past due", "Courtesy"];
+  const groups = [
+    rows.filter((r) => r.item.dueDate === date),
+    rows.filter(
+      (r) => r.item.dueDate > date && r.item.dueDate <= addDays(date, 7),
     ),
-  );
+    rows.filter((r) => r.item.dueDate < date),
+    rows.filter((r) => r.item.dueDate < date && date <= r.item.graceUntil),
+  ];
   const selected = groups[tabs.indexOf(tab)];
+  const unsigned = data.loans.filter(
+    (l) =>
+      l.status === "active" && !l.signatures.borrower && !l.documents?.length,
+  ).length;
+  const valid = liveTransactions(data.transactions);
   const chart = Array.from({ length: 6 }, (_, i) => {
     const d = addMonthsClamped(date, -5 + i),
       m = d.slice(0, 7);
@@ -170,7 +149,7 @@ export function HomePage({
       label: new Intl.DateTimeFormat("en", {
         month: "short",
         timeZone: "UTC",
-      }).format(new Date(d + "T00:00:00Z")),
+      }).format(new Date(`${d}T00:00:00Z`)),
       collected: valid
         .filter((t) => t.type === "PAYMENT" && t.date.startsWith(m))
         .reduce((s, t) => s + t.amount, 0),
@@ -183,184 +162,377 @@ export function HomePage({
     };
   });
   const max = Math.max(
-    ...chart.flatMap((d) => [d.collected, d.released]),
-    100000,
+    ...chart.flatMap((c) => [c.collected, c.released]),
+    10000,
   );
   const recent = [...data.transactions]
     .sort((a, b) => b.createdAt.localeCompare(a.createdAt))
-    .slice(0, 5);
+    .slice(0, 4);
+  const needsBackup =
+    !data.settings.backup.lastSuccess ||
+    Boolean(data.settings.backup.lastError);
+  const attention = [
+    ...(metrics.overdue
+      ? [
+          {
+            icon: Clock3,
+            tone: "red",
+            title: `${groups[2].length} past-due installments`,
+            detail: `${formatMoney(metrics.overdue)} remaining · courtesy does not change due dates`,
+            to: "/reminders",
+          },
+        ]
+      : []),
+    ...(groups[0].length
+      ? [
+          {
+            icon: CalendarDays,
+            tone: "amber",
+            title: `${groups[0].length} installments due today`,
+            detail: `${formatMoney(metrics.dueToday)} expected today`,
+            to: "/reminders",
+          },
+        ]
+      : []),
+    ...(unsigned
+      ? [
+          {
+            icon: FileSignature,
+            tone: "purple",
+            title: `${unsigned} agreements awaiting signatures`,
+            detail: "Capture the signed paper for each loan",
+            to: "/documents",
+          },
+        ]
+      : []),
+    ...(needsBackup
+      ? [
+          {
+            icon: ShieldCheck,
+            tone: "amber",
+            title: data.settings.backup.lastError
+              ? "Backup needs attention"
+              : "Keep a recovery copy",
+            detail: data.settings.backup.lastError
+              ? "Review the backup error and retry"
+              : "Save your notebook outside this browser",
+            to: "/backups",
+          },
+        ]
+      : []),
+    ...(groups[1].length
+      ? [
+          {
+            icon: CalendarDays,
+            tone: "purple",
+            title: `${groups[1].length} installments coming up`,
+            detail: `${formatMoney(metrics.upcoming)} in the next 7 days`,
+            to: "/reminders",
+          },
+        ]
+      : []),
+  ].slice(0, 4);
   return (
-    <>
-      <div className="page-heading">
+    <div className="home-page">
+      <div className="page-heading home-heading">
         <div>
-          <h1>
-            Your lending, in balance<span style={{ color: "#c4c1e8" }}>.</span>
-          </h1>
-          <p>A little more clarity. A little less paperwork.</p>
+          <span className="eyebrow">YOUR LENDING NOTEBOOK</span>
+          <h1>A little clarity. A lot of peace of mind.</h1>
+          <p>Everything you need to keep your lending in balance.</p>
         </div>
         <div className="heading-actions">
-          <button
-            className="button desktop-only"
-            onClick={() => actions.borrower()}
-          >
-            <Plus size={15} />
+          <button className="button" onClick={() => actions.borrower()}>
+            <Plus size={16} />
             Add borrower
           </button>
-          <button className="button primary" onClick={() => actions.payment()}>
-            <ArrowDownLeft size={15} />
-            Receive payment
+          <button className="button primary" onClick={() => actions.loan()}>
+            <Plus size={16} />
+            New loan
           </button>
         </div>
       </div>
       <div className="subheader">
         <span className="date-pill">
-          <CalendarDays size={13} />
+          <CalendarDays size={15} />
           {new Intl.DateTimeFormat("en-PH", {
-            weekday: "long",
+            weekday: "short",
             month: "long",
             day: "numeric",
             year: "numeric",
             timeZone: "Asia/Manila",
-          }).format(new Date())}
-          <ChevronDown size={12} />
+          }).format(new Date(`${date}T04:00:00Z`))}
         </span>
-        <button className="backup-chip" onClick={() => nav("/settings")}>
-          <span
-            className="dot"
-            style={{
-              color: data.settings.backup.lastError
-                ? "#cf737a"
-                : data.settings.backup.lastSuccess
-                  ? "#70ae90"
-                  : "#c5b685",
-            }}
-          />
-          {data.settings.backup.lastError
-            ? "Backup needs attention ? Retry"
-            : data.settings.backup.lastSuccess
-              ? `Backup saved ${new Intl.DateTimeFormat("en-PH", { month: "short", day: "numeric", timeZone: "Asia/Manila" }).format(new Date(data.settings.backup.lastSuccess))}`
-              : "Your notebook is local · Save a backup"}
-          <ArrowUpRight size={11} />
-        </button>
+        <label className="range-control">
+          <span>Cash activity</span>
+          <select
+            aria-label="Dashboard time range"
+            value={range}
+            onChange={(e) => setRange(e.target.value)}
+          >
+            {["This month", "Last 30 days", "All time"].map((r) => (
+              <option key={r}>{r}</option>
+            ))}
+          </select>
+        </label>
       </div>
-      <div className="kpi-grid">
-        {(
-          [
-            {
-              label: "Outstanding balance",
-              amount: outstanding,
-              topic: "balance",
-              icon: <Wallet />,
-              foot: "Across your active loans",
-            },
-            {
-              label: "Collected this month",
-              amount: collected,
-              topic: "collected",
-              icon: <ArrowDownLeft />,
-              foot: "Every payment accounted for",
-              green: true,
-            },
-            {
-              label: "Released this month",
-              amount: released,
-              topic: "released",
-              icon: <ArrowUpRight />,
-              foot: "Cash put into your community",
-            },
-            {
-              label: "Interest earned",
-              amount: interest,
-              topic: "interest",
-              icon: <TrendingUp />,
-              foot: "From this month’s releases",
-            },
-            {
-              label: "Active loans",
-              amount: active,
-              topic: "balance",
-              icon: <Landmark />,
-              foot: `${data.borrowers.filter((b) => b.status === "active").length} borrowers in your notebook`,
-              count: true,
-            },
-          ] as const
-        ).map((k) => (
-          <div className="kpi" key={k.label}>
-            <div className="kpi-label">
-              {k.label}
-              <Help topic={k.topic} />
-              <span className="kpi-icon">{k.icon}</span>
-            </div>
-            <span className="kpi-value">
-              {"count" in k ? k.amount : <Money amount={k.amount} />}
+      <div className="overview-grid">
+        <section className="portfolio-card">
+          <div className="portfolio-top">
+            <span className="portfolio-icon">
+              <Wallet size={20} />
             </span>
-            <p className={`kpi-foot ${"green" in k ? "green" : ""}`}>
-              {"green" in k && <CircleCheck size={10} />} {k.foot}
-            </p>
+            <span className="status purple">
+              <span className="dot" />
+              Saved on this device
+            </span>
           </div>
-        ))}
-      </div>
-      <div className="dashboard-top">
-        <div className="balance-hero">
-          <span className="eyebrow">
-            <Wallet size={14} />
-            YOUR MONEY AT WORK
-          </span>
-          <div className="hero-amount">
-            <Money amount={outstanding} />
+          <div className="portfolio-label">
+            Outstanding repayments <Help topic="balance" />
           </div>
-          <p className="hero-sub">
-            Total outstanding balance <Help topic="balance" />
+          <div className="portfolio-amount">
+            <Money amount={metrics.outstanding} />
+          </div>
+          <p className="portfolio-caption">
+            The remaining amount borrowers have agreed to repay.
           </p>
-          <div className="hero-footer">
+          <div className="portfolio-bottom">
             <div>
+              <small>Cash released on open loans</small>
               <b>
-                {active} active {active === 1 ? "loan" : "loans"} ·{" "}
-                {data.borrowers.length}{" "}
-                {data.borrowers.length === 1 ? "borrower" : "borrowers"}
+                <Money amount={metrics.openCash} />
               </b>
-              <p>Small loans. Stronger communities.</p>
             </div>
-            <button className="button" onClick={() => nav("/borrowers")}>
-              View accounts
-              <ArrowRight size={13} />
+            <div>
+              <small>Active loans</small>
+              <b>
+                {metrics.activeLoans}
+                <span> / {metrics.activeBorrowers} borrowers</span>
+              </b>
+            </div>
+            <button
+              className="icon-button"
+              aria-label="View borrower accounts"
+              onClick={() => nav("/borrowers")}
+            >
+              <ArrowUpRight size={20} />
             </button>
           </div>
-        </div>
-        <div className="panel chart-panel">
-          <div className="section-title">
+        </section>
+        <section className="panel attention-panel">
+          <SectionTitle
+            title="Needs attention"
+            action="View reminders"
+            onClick={() => nav("/reminders")}
+          />
+          {attention.length ? (
+            attention.map((a) => (
+              <button
+                key={a.title}
+                className="attention-row"
+                onClick={() => nav(a.to)}
+              >
+                <span className={`attention-icon ${a.tone}`}>
+                  <a.icon size={17} />
+                </span>
+                <span>
+                  <b>{a.title}</b>
+                  <small>{a.detail}</small>
+                </span>
+                <ArrowRight size={14} />
+              </button>
+            ))
+          ) : (
+            <Empty
+              icon={<CircleCheck />}
+              title="Everything is in order"
+              body="We'll surface due dates and tasks here as they come up."
+            />
+          )}
+        </section>
+      </div>
+      <div className="home-stats">
+        {[
+          {
+            label: "Cash collected",
+            value: metrics.collected,
+            icon: ArrowDownLeft,
+            tone: "emerald",
+            foot: "Repayments received",
+            help: "collected",
+          },
+          {
+            label: "Cash released",
+            value: metrics.released,
+            icon: ArrowUpRight,
+            tone: "purple",
+            foot: "Actual money handed over",
+            help: "released",
+          },
+          {
+            label: "Finance charges earned",
+            value: metrics.charges,
+            icon: TrendingUp,
+            tone: "purple",
+            foot: "Proportional to repayments",
+            help: "interest",
+          },
+          {
+            label: "Past-due obligations",
+            value: metrics.overdue,
+            icon: Clock3,
+            tone: "red",
+            foot: "Includes the courtesy window",
+            help: "mercy",
+          },
+        ].map((k) => (
+          <section className={`panel home-stat ${k.tone}`} key={k.label}>
             <div>
-              <h2>Cash flow</h2>
-              <p>The rhythm of your lending notebook</p>
-            </div>
-            <div className="chart-key">
-              <span>
-                <i />
-                Collected
+              <span className="stat-icon">
+                <k.icon size={17} />
               </span>
-              <span>
-                <i className="release" />
-                Released
-              </span>
+              <span>{k.label}</span>
+              <Help
+                topic={
+                  k.help as "collected" | "released" | "interest" | "mercy"
+                }
+              />
             </div>
+            <Money amount={k.value} />
+            <p>{k.foot}</p>
+          </section>
+        ))}
+      </div>
+      <div className="quick-action-strip">
+        <span>Quick actions</span>
+        <button onClick={() => actions.payment()}>
+          <ArrowDownLeft size={16} />
+          Record payment
+        </button>
+        <button onClick={() => nav("/calculator")}>
+          <Wallet size={16} />
+          Try calculator
+        </button>
+        <button
+          onClick={() =>
+            document
+              .querySelector<HTMLInputElement>('[aria-label="Global search"]')
+              ?.focus()
+          }
+        >
+          <Search size={16} />
+          Search records
+        </button>
+        <button onClick={() => nav("/reports")}>
+          <TrendingUp size={16} />
+          View reports
+          <ArrowRight size={13} />
+        </button>
+      </div>
+      <div className="dashboard-bottom">
+        <section className="panel table-panel">
+          <div className="panel-head">
+            <SectionTitle
+              title="Your collection schedule"
+              action="View all"
+              onClick={() => nav("/reminders")}
+            />
           </div>
-          <div className="chart-total" style={{ marginBottom: 20 }}>
-            <strong>
-              <Money amount={collected} />
-            </strong>
-            <small>collected this month</small>
+          <div className="tabs" role="tablist" aria-label="Collection schedule">
+            {tabs.map((t, i) => (
+              <button
+                role="tab"
+                aria-selected={tab === t}
+                className={`tab ${tab === t ? "active" : ""}`}
+                key={t}
+                onClick={() => setTab(t)}
+              >
+                {t}
+                <span className="count">{groups[i].length}</span>
+              </button>
+            ))}
+          </div>
+          <div className="table-head">
+            <span>BORROWER / DUE DATE</span>
+            <span>REMAINING</span>
+            <span>STATUS</span>
+            <span>ACTION</span>
+          </div>
+          {selected.length ? (
+            selected
+              .slice(0, 5)
+              .map((r) => (
+                <ReminderRow
+                  key={`${r.loan.id}-${r.item.no}`}
+                  row={r}
+                  actions={actions}
+                  prefix={data.settings.borrowerPrefix}
+                />
+              ))
+          ) : (
+            <Empty
+              icon={<CalendarDays />}
+              title={
+                tab === "Past due"
+                  ? "No past-due installments"
+                  : "A clear schedule ahead"
+              }
+              body={
+                data.loans.length
+                  ? "There are no unpaid installments in this group."
+                  : "Add a borrower and release a loan. Your upcoming collections will appear here."
+              }
+              action={
+                !data.borrowers.length ? (
+                  <button
+                    className="button small"
+                    onClick={() => actions.borrower()}
+                  >
+                    <Plus size={14} />
+                    Add your first borrower
+                  </button>
+                ) : undefined
+              }
+            />
+          )}
+          <div className="table-footer">
+            <span>Contractual due dates · Asia/Manila</span>
+            <span>
+              <Check size={12} />
+              Checked when you open OweMe
+            </span>
+          </div>
+        </section>
+        <section className="panel chart-panel">
+          <SectionTitle
+            title="Cash in, cash out"
+            action="Reports"
+            onClick={() => nav("/reports")}
+          />
+          <div className="chart-key">
+            <span>
+              <i />
+              Collected
+            </span>
+            <span>
+              <i className="release" />
+              Released
+            </span>
+            <small>Last 6 months</small>
           </div>
           <div
             className="chart"
             role="img"
-            aria-label={`Six-month cash flow. This month collected ${formatMoney(collected)}, released ${formatMoney(released)}.`}
+            aria-label={chart
+              .map(
+                (c) =>
+                  `${c.label}: collected ${formatMoney(c.collected)}, released ${formatMoney(c.released)}`,
+              )
+              .join(". ")}
           >
             <div className="chart-y">
               {[1, 0.75, 0.5, 0.25, 0].map((n) => (
                 <span key={n}>
-                  {n
-                    ? `₱${Math.round((max * n) / 100).toLocaleString("en")}`
-                    : "₱0"}
+                  ₱{Math.round((max * n) / 100).toLocaleString("en-PH")}
                 </span>
               ))}
             </div>
@@ -375,12 +547,20 @@ export function HomePage({
                   <div
                     className="bar-group"
                     key={c.label}
-                    title={`${c.label}: collected ${formatMoney(c.collected)}, released ${formatMoney(c.released)}`}
+                    title={`${c.label}: ${formatMoney(c.collected)} collected, ${formatMoney(c.released)} released`}
                   >
-                    <i style={{ height: `${(c.collected / max) * 85}%` }} />
+                    <i
+                      style={{
+                        height: `${(c.collected / max) * 85}%`,
+                        minHeight: c.collected ? 2 : 0,
+                      }}
+                    />
                     <i
                       className="release"
-                      style={{ height: `${(c.released / max) * 85}%` }}
+                      style={{
+                        height: `${(c.released / max) * 85}%`,
+                        minHeight: c.released ? 2 : 0,
+                      }}
                     />
                     <span>{c.label}</span>
                   </div>
@@ -388,175 +568,70 @@ export function HomePage({
               </div>
             </div>
           </div>
-        </div>
-      </div>
-      <div className="dashboard-bottom">
-        <div className="panel table-panel">
-          <div className="panel-head">
-            <SectionTitle
-              title="A gentle nudge, right on time"
-              action="All reminders"
-              onClick={() => nav("/reminders")}
-            />
+          <div className="chart-note">
+            <ShieldCheck size={14} />
+            <span>
+              Collections include repayments of the face amount. They are not
+              all profit.
+            </span>
           </div>
-          <div className="tabs">
-            {tabs.map((t, i) => (
+        </section>
+      </div>
+      <section className="panel home-recent">
+        <SectionTitle
+          title="Recent activity"
+          action="Full activity"
+          onClick={() => nav("/activity")}
+        />
+        {recent.length ? (
+          <div className="recent-grid">
+            {recent.map((t) => (
               <button
-                className={`tab ${tab === t ? "active" : ""}`}
-                key={t}
-                onClick={() => setTab(t)}
+                className="recent-entry"
+                key={t.id}
+                onClick={() => actions.receipt(t)}
               >
-                {t}
-                {groups[i].length > 0 && (
-                  <span className="count">{groups[i].length}</span>
-                )}
+                <span
+                  className={`attention-icon ${t.type === "PAYMENT" ? "emerald" : "purple"}`}
+                >
+                  {t.type === "PAYMENT" ? (
+                    <ArrowDownLeft size={16} />
+                  ) : (
+                    <ArrowUpRight size={16} />
+                  )}
+                </span>
+                <span>
+                  <b>
+                    {t.type === "PAYMENT"
+                      ? "Payment received"
+                      : t.type === "VOID"
+                        ? "Transaction reversed"
+                        : "Cash released"}
+                  </b>
+                  <small>
+                    {t.borrowerSnapshot.fullName} · {t.date}
+                  </small>
+                </span>
+                <Money amount={t.amount} />
               </button>
             ))}
           </div>
-          <div className="table-head">
-            <span>BORROWER</span>
-            <span>AMOUNT DUE</span>
-            <span>STATUS</span>
-            <span>ACTION</span>
+        ) : (
+          <div className="recent-empty">
+            <Inbox size={20} />
+            <span>Your releases, payments, and updates will appear here.</span>
           </div>
-          {selected.length ? (
-            selected
-              .slice(0, 5)
-              .map((r) => (
-                <ReminderRow
-                  key={r.loan.id + "-" + r.item.no}
-                  row={r}
-                  actions={actions}
-                  prefix={data.settings.borrowerPrefix}
-                />
-              ))
-          ) : (
-            <Empty
-              icon={<CircleCheck />}
-              title={
-                tab === "Overdue"
-                  ? "No overdue payments"
-                  : "You’re all caught up"
-              }
-              body={
-                data.borrowers.length
-                  ? "No installments in this group. Your upcoming dues will appear here."
-                  : "Add your first borrower and loan. We’ll keep an eye on the dates."
-              }
-              action={
-                !data.borrowers.length ? (
-                  <button
-                    className="button small"
-                    onClick={() => actions.borrower()}
-                  >
-                    <Plus size={13} />
-                    Add your first borrower
-                  </button>
-                ) : undefined
-              }
-            />
-          )}
-          <div className="table-footer">
-            <span>
-              {selected.length}{" "}
-              {selected.length === 1 ? "installment" : "installments"} · checked
-              when you open OweMe
-            </span>
-            <ShieldCheck size={12} />
-          </div>
-        </div>
-        <div className="panel activity-panel">
-          <SectionTitle
-            title="Recent activity"
-            action="View all"
-            onClick={() => nav("/history")}
-          />
-          <div className="activity-list">
-            {recent.length ? (
-              recent.map((t) => (
-                <button
-                  className="activity-item"
-                  key={t.id}
-                  onClick={() => actions.receipt(t)}
-                  style={{ width: "100%", textAlign: "left" }}
-                >
-                  <span
-                    className={`activity-icon ${t.type === "PAYMENT" ? "" : t.type === "VOID" ? "void" : "out"}`}
-                  >
-                    {t.type === "PAYMENT" ? (
-                      <ArrowDownLeft size={15} />
-                    ) : t.type === "VOID" ? (
-                      <Clock3 size={15} />
-                    ) : (
-                      <ArrowUpRight size={15} />
-                    )}
-                  </span>
-                  <span className="activity-content">
-                    <b>
-                      {t.type === "PAYMENT"
-                        ? "Payment received"
-                        : t.type === "ADVANCE"
-                          ? "Advance released"
-                          : t.type === "VOID"
-                            ? "Transaction voided"
-                            : "Loan released"}
-                    </b>
-                    <p>
-                      {t.borrowerSnapshot.fullName} · #
-                      {borrowerNumber(t.borrowerSnapshot.numericId)}
-                    </p>
-                  </span>
-                  <span
-                    className={`activity-money ${t.type !== "PAYMENT" ? "out" : ""}`}
-                  >
-                    <Money amount={t.amount} />
-                    <time>{t.date.slice(5)}</time>
-                  </span>
-                </button>
-              ))
-            ) : (
-              <Empty
-                icon={<Inbox />}
-                title="Your story starts here"
-                body="Releases, payments, and advances will form a clear timeline."
-              />
-            )}
-          </div>
-          <div className="tip-card">
-            <Sparkles size={15} />
-            <div>
-              <b>A notebook you can count on</b>Your records stay on this device
-              and work offline. A regular backup keeps them safe.
-            </div>
-          </div>
-        </div>
-      </div>
-      <div className="page-foot">
+        )}
+      </section>
+      <footer className="page-foot">
         <span>
-          <ShieldCheck size={11} />
-          Private by design. Stored on your device.
+          <ShieldCheck size={12} />
+          Private on your device. Ready when you're offline.
         </span>
         <span>
-          Made for your community <span style={{ color: "#aaa4d7" }}>✦</span>{" "}
-          OweMe
+          Made for your everyday lending <Users size={12} />
         </span>
-      </div>
-      {!data.borrowers.length && (
-        <div
-          className="dashboard-quick"
-          style={{ display: "flex", gap: 10, marginTop: 25 }}
-        >
-          <button className="text-button" onClick={() => actions.borrower()}>
-            <Users size={14} />
-            Start your borrower notebook
-            <ArrowRight size={13} />
-          </button>
-          <button className="text-button" onClick={() => nav("/calculator")}>
-            <Banknote size={14} />
-            Try the loan calculator
-          </button>
-        </div>
-      )}
-    </>
+      </footer>
+    </div>
   );
 }

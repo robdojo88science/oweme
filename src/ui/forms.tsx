@@ -1,11 +1,28 @@
-import { Children, cloneElement, isValidElement, useId, useState } from "react";
+import {
+  Children,
+  cloneElement,
+  isValidElement,
+  useId,
+  useRef,
+  useState,
+} from "react";
 import type { FormEvent, ReactNode } from "react";
 import { useLiveQuery } from "dexie-react-hooks";
-import { ArrowRight, Camera, Info, Plus, Printer, Wallet } from "lucide-react";
+import {
+  ArrowRight,
+  Camera,
+  Info,
+  Plus,
+  Printer,
+  Save,
+  Trash2,
+  Wallet,
+} from "lucide-react";
 import type {
   Borrower,
   Installment,
   Loan,
+  LoanDraft,
   Settings,
   SignatureRef,
   Transaction,
@@ -36,10 +53,13 @@ import {
 } from "../data/service";
 import { compressImage } from "../media/images";
 import { SignatureCapture } from "../components/SignatureCapture";
-import { loanSlipPDF, printFile } from "../exports";
+import { downloadFile, loanSlipPDF, printFile } from "../exports";
 import { ErrorBox, Help, Modal, Money, Stars, Submit } from "./primitives";
 import { haptic } from "./store";
 import type { InfoKey } from "./info";
+import { loanCost } from "./loanCost";
+import { deleteLoanDraft, saveLoanDraft } from "./loanDrafts";
+import type { LoanDraftInput } from "./loanDrafts";
 
 export function Field({
   label,
@@ -85,9 +105,11 @@ export function Field({
 export function Schedule({
   items,
   admin = true,
+  forecast = false,
 }: {
   items: Installment[];
   admin?: boolean;
+  forecast?: boolean;
 }) {
   const asOf = today();
   return (
@@ -97,6 +119,7 @@ export function Schedule({
           <th>#</th>
           <th>Official due date</th>
           <th>Amount</th>
+          {forecast && <th>Balance after</th>}
           {admin && (
             <>
               <th>Paid</th>
@@ -115,6 +138,15 @@ export function Schedule({
               <td>
                 <Money amount={x.amountDue} />
               </td>
+              {forecast && (
+                <td>
+                  <Money
+                    amount={items
+                      .filter((item) => item.no > x.no)
+                      .reduce((sum, item) => sum + item.amountDue, 0)}
+                  />
+                </td>
+              )}
               {admin && (
                 <>
                   <td>
@@ -138,17 +170,21 @@ export function Status({ status }: { status: string }) {
       ? "green"
       : status === "Overdue"
         ? "red"
-        : status === "Mercy" || status === "Partial"
+        : ["Mercy", "Partial", "Due today", "Due soon", "Upcoming"].includes(
+              status,
+            )
           ? "amber"
-          : status === "Due today" ||
-              status === "Due soon" ||
-              status === "advance"
+          : status === "advance"
             ? "purple"
             : "";
   return (
     <span className={`status ${color}`}>
       <i className="dot" />
-      {status === "rolled_over" ? "Rolled over" : status}
+      {status === "rolled_over"
+        ? "Rolled over"
+        : status === "Mercy"
+          ? "Courtesy · late"
+          : status}
       {status === "Mercy" && <Help topic="mercy" />}
     </span>
   );
@@ -165,6 +201,11 @@ export function BorrowerForm({
   onSaved: (b: Borrower) => void;
 }) {
   const [name, setName] = useState(borrower?.fullName || ""),
+    [alias, setAlias] = useState(borrower?.alias || ""),
+    [barangay, setBarangay] = useState(borrower?.barangay || ""),
+    [registered, setRegistered] = useState(
+      borrower?.registrationDate || today(),
+    ),
     [address, setAddress] = useState(borrower?.address || ""),
     [contact, setContact] = useState(borrower?.contact || ""),
     [income, setIncome] = useState(
@@ -199,7 +240,10 @@ export function BorrowerForm({
         fullName: name.trim(),
         address: address.trim(),
         contact,
-        monthlyIncome: parseMoney(income),
+        monthlyIncome: parseMoney(income || "0"),
+        alias,
+        barangay,
+        registrationDate: registered,
         photo,
         notes,
         rateOverride: rate === "" ? undefined : Number(rate) / 100,
@@ -219,7 +263,7 @@ export function BorrowerForm({
   return (
     <Modal
       title={borrower ? "Edit borrower" : "New borrower"}
-      subtitle="A familiar face. A clearer account."
+      subtitle="Only a full name is required. Add other details when useful."
       onClose={onClose}
     >
       <form onSubmit={save}>
@@ -234,13 +278,21 @@ export function BorrowerForm({
               autoFocus
             />
           </Field>
-          <Field label="Address / Purok" full>
+          <Field label="Address / Purok (optional)" full>
             <input
               aria-label="Address / Purok"
               value={address}
               onChange={(e) => setAddress(e.target.value)}
               placeholder="Purok, barangay, city"
-              required
+            />
+          </Field>
+          <Field label="Alias (optional)">
+            <input value={alias} onChange={(e) => setAlias(e.target.value)} />
+          </Field>
+          <Field label="Barangay / city (optional)">
+            <input
+              value={barangay}
+              onChange={(e) => setBarangay(e.target.value)}
             />
           </Field>
           <Field label="Contact number (optional)">
@@ -251,14 +303,20 @@ export function BorrowerForm({
               placeholder="09XX XXX XXXX"
             />
           </Field>
-          <Field label="Monthly income (Sahod)" topic="income">
+          <Field label="Monthly income (optional)" topic="income">
             <input
               aria-label="Monthly income (Sahod)"
               inputMode="decimal"
               value={income}
               onChange={(e) => setIncome(e.target.value)}
-              placeholder="0.00"
-              required
+              placeholder="Not yet provided"
+            />
+          </Field>
+          <Field label="Registration date">
+            <input
+              type="date"
+              value={registered}
+              onChange={(e) => setRegistered(e.target.value)}
             />
           </Field>
           <Field label="Borrower photo (optional)" full>
@@ -299,40 +357,46 @@ export function BorrowerForm({
             existing account before saving.
           </div>
         )}
-        <p className="form-section-title">Optional borrower defaults</p>
-        <div className="form-grid">
-          <Field label="Interest rate (%)" topic="rate">
-            <input
-              type="number"
-              min="0"
-              max="99.99"
-              step="0.01"
-              placeholder="Use global default"
-              value={rate}
-              onChange={(e) => setRate(e.target.value)}
-            />
-          </Field>
-          <Field label="Maximum months" topic="term">
-            <input
-              type="number"
-              min="1"
-              max="120"
-              placeholder="Use global default"
-              value={term}
-              onChange={(e) => setTerm(e.target.value)}
-            />
-          </Field>
-          <Field label="Mercy days · admin only" topic="mercy">
-            <input
-              type="number"
-              min="0"
-              max="365"
-              placeholder="Use global default"
-              value={grace}
-              onChange={(e) => setGrace(e.target.value)}
-            />
-          </Field>
-        </div>
+        <details style={{ marginTop: 18 }}>
+          <summary
+            style={{ cursor: "pointer", padding: "12px 0", fontSize: 12 }}
+          >
+            Optional loan defaults
+          </summary>
+          <div className="form-grid">
+            <Field label="One-time charge (%)" topic="rate">
+              <input
+                type="number"
+                min="0"
+                max="99.99"
+                step="0.01"
+                placeholder="Use global default"
+                value={rate}
+                onChange={(e) => setRate(e.target.value)}
+              />
+            </Field>
+            <Field label="Maximum months" topic="term">
+              <input
+                type="number"
+                min="1"
+                max="120"
+                placeholder="Use global default"
+                value={term}
+                onChange={(e) => setTerm(e.target.value)}
+              />
+            </Field>
+            <Field label="Courtesy days · internal" topic="mercy">
+              <input
+                type="number"
+                min="0"
+                max="365"
+                placeholder="Use global default"
+                value={grace}
+                onChange={(e) => setGrace(e.target.value)}
+              />
+            </Field>
+          </div>
+        </details>
         <ErrorBox error={error} />
         <div className="form-actions">
           <button className="button" type="button" onClick={onClose}>
@@ -352,6 +416,8 @@ export interface LoanPreset {
   amount?: string;
   inputMode?: "face" | "cash";
   income?: string;
+  affordabilityPercent?: number;
+  maxTermOverride?: number;
   rate?: string;
   advance?: boolean;
   advanceMode?: "merge" | "separate";
@@ -385,9 +451,21 @@ export function LoanForm({
     preset.previousLoanId || active[0]?.id || "",
   );
   const previous = active.find((l) => l.id === previousId) || active[0];
-  const isAdvance = !!preset.advance;
+  const [isAdvance, setIsAdvance] = useState(!!preset.advance);
+  const [draftId, setDraftId] = useState<string>();
+  const [draftMessage, setDraftMessage] = useState("");
   const [income, setIncome] = useState(
       preset.income || moneyInput(b?.monthlyIncome || 0),
+    ),
+    [affordability, setAffordability] = useState(
+      String(
+        preset.affordabilityPercent ??
+          settings.defaults.affordabilityPercent ??
+          30,
+      ),
+    ),
+    [maximumTerm, setMaximumTerm] = useState(
+      preset.maxTermOverride ? String(preset.maxTermOverride) : "",
     ),
     [term, setTerm] = useState(
       preset.term || b?.maxTermOverride || settings.defaults.maxTerm,
@@ -405,22 +483,34 @@ export function LoanForm({
       preset.inputMode ||
         (settings.defaults.interestMode === "added" ? "cash" : "face"),
     ),
-    [amount, setAmount] = useState(
-      preset.amount ||
-        moneyInput(
-          isAdvance
-            ? Math.max(
-                0,
-                (b?.monthlyIncome || 0) * term -
-                  (previous ? balance(previous) : 0),
-              )
-            : (b?.monthlyIncome || 0) * term,
-        ),
-    ),
+    [amount, setAmount] = useState(() => {
+      if (preset.amount) return preset.amount;
+      const face = Math.max(
+        0,
+        Math.round(
+          ((b?.monthlyIncome || 0) * term * Number(affordability)) / 100,
+        ) - (isAdvance && previous ? balance(previous) : 0),
+      );
+      if (!face) return "";
+      return moneyInput(
+        inputMode === "cash"
+          ? quoteLoan({
+              income: b?.monthlyIncome || 0,
+              term,
+              rate: Number(rate) / 100,
+              interestMode,
+              amount: face,
+              inputMode: "face",
+            }).netRelease
+          : face,
+      );
+    }),
     [date, setDate] = useState(preset.releaseDate || today()),
     [releasedBy, setReleasedBy] = useState(settings.defaultReceivedBy),
     [notes, setNotes] = useState(""),
     [override, setOverride] = useState(false),
+    [overrideReason, setOverrideReason] = useState(""),
+    [releaseConfirmed, setReleaseConfirmed] = useState(false),
     [sig, setSig] = useState<SignatureRef>(),
     [adminSig, setAdminSig] = useState<SignatureRef | undefined>(
       settings.adminSignature,
@@ -430,18 +520,48 @@ export function LoanForm({
     [showSig, setShowSig] = useState(false),
     [error, setError] = useState(""),
     [busy, setBusy] = useState(false);
+  const saving = useRef(false);
   const signers = useLiveQuery(() => db.signerProfiles.toArray(), []) || [];
+  const drafts =
+    useLiveQuery(
+      async () => (await db.settings.get("settings"))?.loanDrafts || [],
+      [],
+    ) || [];
   let preview: ReturnType<typeof quoteLoan> | undefined,
     adv: ReturnType<typeof quoteAdvance> | undefined,
     items: Installment[] = [],
     quoteError = "";
   const outstanding = active.reduce((s, l) => s + balance(l), 0);
-  const maxTerm = b?.maxTermOverride ?? settings.defaults.maxTerm;
+  const maxTerm = maximumTerm
+    ? Number(maximumTerm)
+    : (b?.maxTermOverride ?? settings.defaults.maxTerm);
   try {
+    if (b?.status === "archived")
+      throw new Error(
+        "Restore this archived borrower before issuing a loan. The saved draft is retained.",
+      );
+    if (
+      !Number.isInteger(maxTerm) ||
+      maxTerm < 1 ||
+      maxTerm > 120 ||
+      term > maxTerm
+    )
+      throw new Error("Choose a term within the loan maximum (1–120 months).");
+    if (!rate.trim())
+      throw new Error(
+        "Enter a one-time charge, including 0 for zero interest.",
+      );
+    if (
+      !affordability ||
+      Number(affordability) < 1 ||
+      Number(affordability) > 100
+    )
+      throw new Error("Choose an affordability percentage from 1 to 100.");
     const parsed = parseMoney(amount || "0"),
       inc = parseMoney(income || "0");
     preview = quoteLoan({
       income: inc,
+      affordabilityPercent: Number(affordability),
       term,
       rate: Number(rate) / 100,
       interestMode,
@@ -453,6 +573,7 @@ export function LoanForm({
         balance: balance(previous),
         allOutstanding: outstanding,
         income: inc,
+        affordabilityPercent: Number(affordability),
         term,
         rate: Number(rate) / 100,
         interestMode,
@@ -474,6 +595,10 @@ export function LoanForm({
     quoteError = e instanceof Error ? e.message : String(e);
   }
   const exceeded = adv?.capExceeded ?? preview?.capExceeded;
+  const costs =
+    !isAdvance && preview && !quoteError
+      ? loanCost(preview.netRelease, preview.interest, date, items)
+      : undefined;
   const rating = borrowerRating(
     loans.filter((l) => l.borrowerId === bid),
     today(),
@@ -482,22 +607,108 @@ export function LoanForm({
   const overdue = active.some((l) =>
     l.installments.some((i) => installmentStatus(i) === "Overdue"),
   );
+  function resumeDraft(draft: LoanDraft) {
+    setDraftId(draft.id);
+    setBid(draft.borrowerId);
+    setIsAdvance(draft.advance);
+    setMode(draft.advanceMode);
+    setPreviousId(draft.previousLoanId || "");
+    setIncome(draft.income);
+    setAffordability(draft.affordabilityPercent);
+    setMaximumTerm(draft.maximumTerm);
+    setTerm(draft.term);
+    setRate(draft.rate);
+    setInterestMode(draft.interestMode);
+    setInputMode(draft.inputMode);
+    setAmount(draft.amount);
+    setDate(draft.releaseDate);
+    setReleasedBy(draft.releasedBy);
+    setNotes(draft.notes);
+    setOverride(draft.overrideCap);
+    setOverrideReason(draft.overrideReason);
+    setWitness(draft.witness);
+    setSig(draft.signatures.borrower);
+    setAdminSig(draft.signatures.admin);
+    setWitnessSig(draft.signatures.witness);
+    setShowSig(!!Object.values(draft.signatures).some(Boolean));
+    setReleaseConfirmed(false);
+    setError("");
+    setDraftMessage(
+      "Draft resumed. Review the terms before confirming a cash release.",
+    );
+  }
+  async function saveDraft() {
+    if (!b || saving.current) return;
+    saving.current = true;
+    setBusy(true);
+    setError("");
+    try {
+      const input: LoanDraftInput = {
+        borrowerId: bid,
+        advance: isAdvance,
+        advanceMode: mode,
+        previousLoanId: isAdvance ? previous?.id : undefined,
+        income,
+        affordabilityPercent: affordability,
+        maximumTerm,
+        term,
+        rate,
+        interestMode,
+        inputMode,
+        amount,
+        releaseDate: date,
+        releasedBy,
+        notes,
+        overrideCap: override,
+        overrideReason,
+        witness,
+        signatures: { borrower: sig, admin: adminSig, witness: witnessSig },
+      };
+      const saved = await saveLoanDraft(input, draftId);
+      setDraftId(saved.id);
+      setDraftMessage(
+        "Draft saved on this device. No funds released and no ledger entry created.",
+      );
+      haptic("success", settings.haptics);
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      saving.current = false;
+      setBusy(false);
+    }
+  }
   async function save(e: FormEvent) {
     e.preventDefault();
+    if (saving.current) return;
+    if (!releaseConfirmed) {
+      setError(
+        "Confirm that the agreement was reviewed and the actual cash was handed over.",
+      );
+      return;
+    }
+    if (exceeded && (!override || !overrideReason.trim())) {
+      setError("Record a reason for exceeding the affordability guideline.");
+      return;
+    }
+    saving.current = true;
     setBusy(true);
     setError("");
     try {
       const input = {
         borrowerId: bid,
+        draftId,
         amount: parseMoney(amount),
-        income: parseMoney(income),
+        income: parseMoney(income || "0"),
+        affordabilityPercent: Number(affordability),
         term,
+        maxTermOverride: maximumTerm ? Number(maximumTerm) : undefined,
         releaseDate: date,
         releasedBy,
         rate: Number(rate) / 100,
         interestMode,
         inputMode,
         overrideCap: override,
+        overrideReason: overrideReason.trim(),
         notes,
         signatures: { borrower: sig, admin: adminSig, witness: witnessSig },
       };
@@ -513,10 +724,11 @@ export function LoanForm({
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
+      saving.current = false;
       setBusy(false);
     }
   }
-  async function draftSlip() {
+  async function draftSlip(download = false) {
     try {
       if (!b || !preview) return;
       const loan: Loan = {
@@ -524,7 +736,9 @@ export function LoanForm({
         loanNo: "DRAFT · NOT RELEASED",
         borrowerId: b.id,
         borrowerSnapshot: b,
-        incomeAtLoan: parseMoney(income),
+        incomeAtLoan: parseMoney(income || "0"),
+        affordabilityPercent: Number(affordability),
+        overrideReason: overrideReason.trim() || undefined,
         termMonths: term,
         rate: Number(rate) / 100,
         interestMode,
@@ -539,6 +753,7 @@ export function LoanForm({
         carriedBalance: adv?.carriedBalance,
         advanceFace: adv?.advanceFace,
         releasedBy,
+        notes,
         signatures: { borrower: sig, admin: adminSig, witness: witnessSig },
       };
       const txn: Transaction = {
@@ -555,7 +770,9 @@ export function LoanForm({
         allocation: [],
         date,
       };
-      await printFile(await loanSlipPDF(loan, txn, settings));
+      const file = await loanSlipPDF(loan, txn, settings);
+      if (download) downloadFile(file, "OweMe-draft-agreement.pdf");
+      else printFile(file);
     } catch (e) {
       setError(String(e));
     }
@@ -571,7 +788,69 @@ export function LoanForm({
       onClose={onClose}
       wide
     >
-      <form onSubmit={save}>
+      <form onSubmit={save} onChangeCapture={() => setReleaseConfirmed(false)}>
+        {drafts.length > 0 && (
+          <details style={{ marginBottom: 20 }}>
+            <summary
+              style={{ cursor: "pointer", padding: "10px 0", fontSize: 12 }}
+            >
+              Saved loan drafts ({drafts.length})
+            </summary>
+            <p className="caption">
+              Editable plans only. Drafts have no effect on balances.
+            </p>
+            {[...drafts]
+              .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))
+              .map((draft) => (
+                <div className="setting-row" key={draft.id}>
+                  <div>
+                    <b>
+                      {borrowers.find(
+                        (person) => person.id === draft.borrowerId,
+                      )?.fullName || "Borrower unavailable"}
+                    </b>
+                    <p>
+                      {draft.advance ? "Advance" : "New loan"} ·{" "}
+                      {draft.term || "—"} months · saved{" "}
+                      {draft.updatedAt.slice(0, 10)}
+                    </p>
+                  </div>
+                  <div style={{ display: "flex", gap: 6 }}>
+                    <button
+                      type="button"
+                      className="button small"
+                      onClick={() => resumeDraft(draft)}
+                    >
+                      Resume draft
+                    </button>
+                    <button
+                      type="button"
+                      className="icon-button"
+                      aria-label={`Delete draft for ${borrowers.find((person) => person.id === draft.borrowerId)?.fullName || "unavailable borrower"}`}
+                      onClick={async () => {
+                        try {
+                          await deleteLoanDraft(draft.id);
+                          if (draftId === draft.id) setDraftId(undefined);
+                          setDraftMessage(
+                            "Draft removed. Issued loans and payments are unchanged.",
+                          );
+                        } catch (cause) {
+                          setError(String(cause));
+                        }
+                      }}
+                    >
+                      <Trash2 size={15} />
+                    </button>
+                  </div>
+                </div>
+              ))}
+          </details>
+        )}
+        {draftMessage && (
+          <div className="alert" role="status">
+            {draftMessage}
+          </div>
+        )}
         <div className="form-grid">
           <Field label="Borrower" full>
             <select
@@ -580,6 +859,8 @@ export function LoanForm({
               onChange={(e) => {
                 const next = borrowers.find((b) => b.id === e.target.value);
                 setBid(e.target.value);
+                setDraftId(undefined);
+                setDraftMessage("");
                 setIncome(moneyInput(next?.monthlyIncome || 0));
                 setRate(
                   String((next?.rateOverride ?? settings.defaults.rate) * 100),
@@ -662,6 +943,19 @@ export function LoanForm({
               value={income}
               onChange={(e) => setIncome(e.target.value)}
               inputMode="decimal"
+            />
+          </Field>
+          <Field label="Affordability (%)" topic="cap">
+            <input
+              aria-label="Loan affordability percentage"
+              type="number"
+              min="1"
+              max="100"
+              value={affordability}
+              onChange={(e) => {
+                setAffordability(e.target.value);
+                setReleaseConfirmed(false);
+              }}
               required
             />
           </Field>
@@ -671,25 +965,44 @@ export function LoanForm({
               type="number"
               min="1"
               max={maxTerm}
-              value={term}
+              value={term || ""}
               onChange={(e) => setTerm(Number(e.target.value))}
               required
             />
           </Field>
-          <Field label="Interest mode" topic="rate">
+          <Field label="Charge type" topic="rate">
             <select
-              value={interestMode}
+              aria-label="Loan charge type"
+              value={rate === "0" ? "zero" : interestMode}
               onChange={(e) => {
+                if (e.target.value === "zero") {
+                  setRate("0");
+                  setInterestMode("upfront");
+                  setInputMode("face");
+                  return;
+                }
+                if (rate === "0") setRate(String(settings.defaults.rate * 100));
                 const m = e.target.value as "upfront" | "added";
                 setInterestMode(m);
                 setInputMode(m === "added" ? "cash" : "face");
               }}
             >
-              <option value="upfront">Deducted upfront</option>
-              <option value="added">Added on top</option>
+              <option value="upfront">Upfront face deduction</option>
+              <option value="added">Add-on charge</option>
+              <option value="zero">Zero interest</option>
             </select>
           </Field>
-          <Field label="Interest rate (%)" topic="rate">
+          <Field label="Maximum months for this loan (optional)" topic="term">
+            <input
+              type="number"
+              min="1"
+              max="120"
+              value={maximumTerm}
+              onChange={(e) => setMaximumTerm(e.target.value)}
+              placeholder={`Default: ${b?.maxTermOverride ?? settings.defaults.maxTerm}`}
+            />
+          </Field>
+          <Field label="One-time charge (%)" topic="rate">
             <input
               type="number"
               min="0"
@@ -793,7 +1106,7 @@ export function LoanForm({
               )}
               <div>
                 <small>
-                  Interest · new cash only <Help topic="interest" />
+                  Finance charge <Help topic="interest" />
                 </small>
                 <b>
                   <Money amount={adv?.interest ?? preview.interest} />
@@ -801,7 +1114,7 @@ export function LoanForm({
               </div>
               <div className="highlight">
                 <small>
-                  Net cash now <Help topic="net" />
+                  Actual cash released <Help topic="net" />
                 </small>
                 <b>
                   <Money amount={adv?.netCash ?? preview.netRelease} />
@@ -809,7 +1122,7 @@ export function LoanForm({
               </div>
               <div>
                 <small>
-                  Total to repay <Help topic="face" />
+                  Face / total repayable <Help topic="face" />
                 </small>
                 <b>
                   <Money amount={adv?.newFace ?? preview.face} />
@@ -824,7 +1137,15 @@ export function LoanForm({
             </div>
             <Schedule items={items} admin={false} />
             <p className="caption" style={{ marginTop: 13 }}>
-              Last installment includes any centavo remainder.
+              First payment is one month after release. No late fee is added.
+              The last installment includes any centavo remainder.
+            </p>
+            <p className="caption">
+              {rate}% is one charge for the whole term, not a monthly rate or
+              APR.
+              {costs &&
+                preview.interest > 0 &&
+                ` Cost versus cash received: ${costs.costOfCashPercent.toFixed(2)}%; annualized effective estimate ${costs.effectiveAnnualPercent.toFixed(2)}% (actual due dates, Actual/365; not a statutory APR).`}
             </p>
           </div>
         )}
@@ -858,7 +1179,7 @@ export function LoanForm({
           </div>
         )}
         <div className={`alert ${exceeded ? "amber" : ""}`}>
-          Maximum {isAdvance ? "advance" : "face amount"}:{" "}
+          Suggested {isAdvance ? "advance" : "face maximum"}:{" "}
           <b>{formatMoney(adv?.maxAdvance ?? preview?.maxFace ?? 0)}</b>{" "}
           <Help topic="cap" />
           {adv?.maxAdvance === 0 && (
@@ -869,20 +1190,36 @@ export function LoanForm({
           )}
           {exceeded && (
             <p>
-              This amount exceeds the income cap. An override will be added to
-              the audit log.
+              This exceeds the affordability guideline. Record your reason
+              before release.
             </p>
           )}
         </div>
         {exceeded && (
-          <label className="checkbox-row">
-            <input
-              type="checkbox"
-              checked={override}
-              onChange={(e) => setOverride(e.target.checked)}
-            />
-            Override cap · record this decision in the audit log
-          </label>
+          <>
+            <label className="checkbox-row">
+              <input
+                type="checkbox"
+                checked={override}
+                onChange={(e) => setOverride(e.target.checked)}
+              />
+              Override guideline · record this decision in the audit log
+            </label>
+            <Field label="Override reason" full>
+              <textarea
+                value={overrideReason}
+                onChange={(e) => setOverrideReason(e.target.value)}
+                required
+                placeholder="Why is this repayment amount affordable?"
+              />
+            </Field>
+          </>
+        )}
+        {Number(affordability) >= 100 && (
+          <div className="alert amber">
+            Committing 100% of reported income may leave nothing for living
+            costs. Consider a conservative percentage.
+          </div>
         )}
         <Field label="Additional notes" full>
           <textarea
@@ -895,13 +1232,26 @@ export function LoanForm({
           Signatures <Help topic="signatures" />
         </p>
         <p className="caption">
-          Print the slip, sign on paper, and scan it here. You can also draw now
-          or add a signature to the saved loan later.
+          Print the agreement for a real paper signature, then upload the signed
+          copy to this loan. On-screen signatures are optional.
         </p>
         <div style={{ display: "flex", gap: 12, marginTop: 12 }}>
-          <button className="button small" type="button" onClick={draftSlip}>
+          <button
+            className="button small"
+            type="button"
+            onClick={() => void draftSlip()}
+            disabled={!!quoteError || !b}
+          >
             <Printer size={14} />
-            Print draft slip
+            Preview / print agreement
+          </button>
+          <button
+            className="button small"
+            type="button"
+            onClick={() => void draftSlip(true)}
+            disabled={!!quoteError || !b}
+          >
+            Save draft PDF
           </button>
           <button
             className="button small"
@@ -947,8 +1297,27 @@ export function LoanForm({
             )}
           </>
         )}
+        <label className="checkbox-row" style={{ marginTop: 20 }}>
+          <input
+            type="checkbox"
+            checked={releaseConfirmed}
+            onChange={(e) => setReleaseConfirmed(e.target.checked)}
+          />
+          I reviewed the agreement and confirm that{" "}
+          {formatMoney(adv?.netCash ?? preview?.netRelease ?? 0)} has been
+          handed to the borrower.
+        </label>
         <ErrorBox error={error || quoteError} />
         <div className="form-actions">
+          <button
+            type="button"
+            className="button"
+            onClick={() => void saveDraft()}
+            disabled={busy || !b}
+          >
+            <Save size={15} />
+            {draftId ? "Update draft" : "Save draft"}
+          </button>
           <button type="button" className="button" onClick={onClose}>
             Cancel
           </button>
@@ -959,7 +1328,8 @@ export function LoanForm({
               busy ||
               !!quoteError ||
               !b ||
-              (!override && !!exceeded) ||
+              !releaseConfirmed ||
+              (!!exceeded && (!override || !overrideReason.trim())) ||
               (isAdvance && !previous)
             }
           >
@@ -1005,8 +1375,10 @@ export function PaymentForm({
       settings.adminSignature,
     ),
     [signatures, setSignatures] = useState(false),
+    [creditConfirmed, setCreditConfirmed] = useState(false),
     [error, setError] = useState(""),
     [busy, setBusy] = useState(false);
+  const paymentSaving = useRef(false);
   const signers = useLiveQuery(() => db.signerProfiles.toArray(), []) || [];
   let allocation: ReturnType<typeof allocatePayment> | undefined;
   try {
@@ -1017,6 +1389,14 @@ export function PaymentForm({
   }
   async function save(e: FormEvent) {
     e.preventDefault();
+    if (paymentSaving.current) return;
+    if (allocation?.unappliedAmount && !creditConfirmed) {
+      setError(
+        "Confirm the extra money will be recorded as unapplied credit, or correct the payment amount.",
+      );
+      return;
+    }
+    paymentSaving.current = true;
     setError("");
     setBusy(true);
     try {
@@ -1037,6 +1417,7 @@ export function PaymentForm({
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
+      paymentSaving.current = false;
       setBusy(false);
     }
   }
@@ -1083,7 +1464,10 @@ export function PaymentForm({
               aria-label="Payment amount"
               inputMode="decimal"
               value={amount}
-              onChange={(e) => setAmount(e.target.value)}
+              onChange={(e) => {
+                setAmount(e.target.value);
+                setCreditConfirmed(false);
+              }}
               required
               autoFocus
             />
@@ -1213,6 +1597,15 @@ export function PaymentForm({
                 Overpayment credit: {formatMoney(allocation.unappliedAmount)}.
                 This is recorded separately on the receipt; it does not reduce
                 another loan automatically.
+                <label className="checkbox-row">
+                  <input
+                    type="checkbox"
+                    checked={creditConfirmed}
+                    onChange={(e) => setCreditConfirmed(e.target.checked)}
+                  />
+                  I confirm this extra cash should be retained as unapplied
+                  credit.
+                </label>
               </div>
             )}
           </div>
@@ -1249,7 +1642,11 @@ export function PaymentForm({
           <button
             type="submit"
             className="button primary"
-            disabled={busy || !loan}
+            disabled={
+              busy ||
+              !loan ||
+              (!!allocation?.unappliedAmount && !creditConfirmed)
+            }
           >
             <Wallet size={15} />
             {busy ? "Saving…" : "Save payment"}

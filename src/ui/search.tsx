@@ -37,7 +37,14 @@ export function buildSearch(
     const values = byBorrower.get(item.borrowerId) || [];
     const identifier = "loanNo" in item ? item.loanNo : item.txnNo;
     addExact(exactIdentifiers, normalize(identifier), item.borrowerId);
-    values.push(identifier, item.notes || "");
+    values.push(
+      identifier,
+      item.notes || "",
+      "referenceNo" in item ? item.referenceNo || "" : "",
+      "documents" in item
+        ? (item.documents ?? []).map((document) => document.name).join(" ")
+        : "",
+    );
     byBorrower.set(item.borrowerId, values);
   }
   for (const note of notes) {
@@ -56,7 +63,9 @@ export function buildSearch(
       id: b.id,
       text: [
         b.fullName,
+        b.alias,
         b.address,
+        b.barangay,
         b.contact,
         b.contact?.replace(/\D/g, ""),
         b.notes,
@@ -80,7 +89,26 @@ export function buildSearch(
       const contactMatches = exactContacts.get(q.replace(/\D/g, ""));
       if (contactMatches) return new Set(contactMatches);
     }
-    return new Set(index.search(q).map((r) => r.id as string));
+    const matches = new Set(index.search(q).map((r) => r.id as string));
+    // Prefix/fuzzy ranking comes first; substring matching also finds the
+    // middle of names, document names and external payment references.
+    const words = normalize(q).split(/\s+/).filter(Boolean);
+    for (const b of borrowers) {
+      if (matches.has(b.id)) continue;
+      const text = normalize(
+        [
+          b.fullName,
+          b.alias,
+          b.address,
+          b.barangay,
+          b.contact,
+          b.notes,
+          ...(byBorrower.get(b.id) ?? []),
+        ].join(" "),
+      );
+      if (words.every((word) => text.includes(word))) matches.add(b.id);
+    }
+    return matches;
   };
 }
 export function Highlight({ text, query }: { text: string; query: string }) {

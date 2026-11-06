@@ -16,6 +16,7 @@ import {
 import { publicText, receiptLines, receiptSignatures } from "./public";
 import { loadImage } from "../media/images";
 import fontUrl from "./fonts/NotoSans-Regular.ttf?url";
+import { loanCost } from "../ui/loanCost";
 
 export interface DocumentOptions {
   includeSignatures?: boolean;
@@ -149,7 +150,7 @@ class Layout {
     this.doc.text(title, this.margin, this.y);
     this.y += 5;
   }
-  table(head: string[], body: (string | number)[][]) {
+  table(head: string[], body: (string | number)[][], compact = false) {
     autoTable(this.doc, {
       startY: this.y,
       head: [head],
@@ -160,7 +161,7 @@ class Layout {
         font: "OweMe",
         fontStyle: "normal",
         fontSize: this.width < 160 ? 7.5 : 8,
-        cellPadding: this.width < 160 ? 1.8 : 2.4,
+        cellPadding: compact ? 1.35 : this.width < 160 ? 1.8 : 2.4,
         textColor: ink,
         lineColor: [231, 232, 238],
         lineWidth: 0.15,
@@ -257,6 +258,48 @@ class Layout {
   }
 }
 
+export interface ReportDocument {
+  from: string;
+  to: string;
+  asOf: string;
+  metrics: [string, string][];
+  channels: [string, string][];
+  aging: [string, string][];
+  notes: string[];
+}
+
+/** Owner-only report; offline font and table pagination match account statements. */
+export async function reportPDF(
+  settings: Settings,
+  report: ReportDocument,
+): Promise<File> {
+  const layout = new Layout({ format: "a4" });
+  await layout.init(settings, "Private financial report");
+  layout.paragraph(
+    `${report.from || "All history"} to ${report.to || "present"} · Current balances as of ${report.asOf} (Asia/Manila).`,
+    8.5,
+    muted,
+  );
+  layout.table(["Metric", "Amount / count"], report.metrics);
+  layout.heading("Payment channels · selected range");
+  layout.table(
+    ["Channel", "Cash collected"],
+    report.channels.length
+      ? report.channels
+      : [["No collections", formatMoney(0)]],
+  );
+  layout.heading("Overdue aging · current contractual obligations");
+  layout.table(["Days past due", "Unpaid amount"], report.aging);
+  layout.heading("Definitions and limitations");
+  for (const note of report.notes) layout.paragraph(note, 8, muted);
+  layout.paragraph(
+    "Private owner report. Review before sharing; borrower records and local backups contain personal information.",
+    8,
+    muted,
+  );
+  return layout.file(`OweMe-report-${report.asOf}.pdf`, settings);
+}
+
 export async function receiptPDF(
   txn: Transaction,
   loan: Loan,
@@ -338,9 +381,12 @@ export async function loanSlipPDF(
   settings: Settings,
   options: DocumentOptions = {},
 ): Promise<File> {
+  const issuedSettings = loan.businessSnapshot
+    ? { ...settings, business: loan.businessSnapshot }
+    : settings;
   const layout = new Layout(options);
   await layout.init(
-    settings,
+    issuedSettings,
     loan.kind === "advance" ? "Advance loan agreement" : "Loan agreement",
   );
   if (options.voided)
@@ -364,12 +410,31 @@ export async function loanSlipPDF(
             ["Additional face amount", formatMoney(txn.advance.advanceFace)],
           ]
         : []),
-      ["Cash received now", formatMoney(loan.netRelease)],
-      ["Interest on new release", formatMoney(loan.interestAmount)],
-      ["Total face amount to repay", formatMoney(loan.faceAmount)],
+      ...(loan.borrowerSnapshot.address
+        ? [["Borrower address", publicText(loan.borrowerSnapshot.address)]]
+        : []),
+      ["Actual cash released", formatMoney(loan.netRelease)],
+      ["One-time finance charge", formatMoney(loan.interestAmount)],
+      ["Face amount / total repayable", formatMoney(loan.faceAmount)],
+      ["Late fees", "Zero. No automatic late charges."],
       ["Term", `${loan.termMonths} month${loan.termMonths === 1 ? "" : "s"}`],
       ["Monthly payment", formatMoney(loan.monthlyAmount)],
     ],
+    true,
+  );
+  const cost =
+    loan.kind === "new"
+      ? loanCost(
+          loan.netRelease,
+          loan.interestAmount,
+          loan.releaseDate,
+          loan.installments,
+        )
+      : undefined;
+  layout.paragraph(
+    `${(loan.rate * 100).toFixed(2)}% is a one-time ${loan.interestMode === "upfront" ? "deduction of face value" : "add-on charge on cash released"} for the entire term, not a monthly rate or APR.${cost ? ` Cost relative to cash received: ${cost.costOfCashPercent.toFixed(2)}%. Estimated effective annual cash-flow yield: ${cost.effectiveAnnualPercent.toFixed(2)}% (Actual/365); this is an explanatory estimate, not a statutory APR.` : ""}`,
+    8,
+    muted,
   );
   layout.heading("Official payment schedule");
   layout.table(
@@ -379,12 +444,13 @@ export async function loanSlipPDF(
       item.dueDate,
       formatMoney(item.amountDue),
     ]),
+    true,
   );
   if (loan.autoNote) layout.paragraph(publicText(loan.autoNote), 8, muted);
   layout.heading("Acknowledgement");
   layout.paragraph(
     publicText(
-      settings.agreementText ||
+      (loan.agreementTextSnapshot ?? settings.agreementText) ||
         "I understand the payment terms above and acknowledge that I received the cash amount shown. Nauunawaan ko ang kasunduan at natanggap ko ang halagang nakasaad.",
     ),
   );

@@ -52,6 +52,7 @@ export function ExportDialog({
   const [preparing, setPreparing] = useState(true);
   const [error, setError] = useState("");
   const [copied, setCopied] = useState(false);
+  const [privacyReviewed, setPrivacyReviewed] = useState(false);
   const invalidRange = !!from && !!to && from > to;
   const summary = useMemo(
     () => borrowerSummary(borrower, loans, settings),
@@ -254,6 +255,15 @@ export function ExportDialog({
             Preparing your PDF…
           </p>
         )}
+        <label className="checkbox-row" style={{ margin: "14px 0" }}>
+          <input
+            type="checkbox"
+            checked={privacyReviewed}
+            onChange={(event) => setPrivacyReviewed(event.target.checked)}
+          />
+          I reviewed this borrower’s details and have permission to share them
+          with the intended recipient.
+        </label>
         <div className="backup-buttons">
           <button
             className="button primary"
@@ -280,7 +290,7 @@ export function ExportDialog({
           </button>
           <button
             className="button"
-            disabled={!file || preparing}
+            disabled={!file || preparing || !privacyReviewed}
             onClick={() => void share()}
           >
             <Share2 size={15} />
@@ -321,7 +331,7 @@ export function ExportDialog({
             </button>
             <button
               className="button"
-              disabled={!file || preparing}
+              disabled={!file || preparing || !privacyReviewed}
               onClick={() => {
                 if (file) emailFile(file, summary);
               }}
